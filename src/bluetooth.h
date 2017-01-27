@@ -96,6 +96,15 @@ typedef enum {
 } link_key_type_t;
 
 /**
+ * @brief Inquiry modes
+ */
+typedef enum {
+  INQUIRY_MODE_STANDARD = 0,
+  INQUIRY_MODE_RSSI,
+  INQUIRY_MODE_RSSI_AND_EIR,
+} inquiry_mode_t;
+
+/**
  * HCI Transport 
  */
 
@@ -267,7 +276,6 @@ typedef enum {
  * @param status
  */
 #define HCI_EVENT_INQUIRY_COMPLETE                         0x01
-// no format yet, can contain multiple results
 
 /** 
  * @format 1B11132
@@ -337,8 +345,11 @@ typedef enum {
  * @param key_flag 
  */
 #define HCI_EVENT_MASTER_LINK_KEY_COMPLETE                 0x0A
+
 #define HCI_EVENT_READ_REMOTE_SUPPORTED_FEATURES_COMPLETE  0x0B
+
 #define HCI_EVENT_READ_REMOTE_VERSION_INFORMATION_COMPLETE 0x0C
+
 #define HCI_EVENT_QOS_SETUP_COMPLETE                       0x0D
 
 /**
@@ -362,7 +373,7 @@ typedef enum {
  */
 #define HCI_EVENT_HARDWARE_ERROR                           0x10
 
-#define HCI_EVENT_FLUSH_OCCURED                            0x11
+#define HCI_EVENT_FLUSH_OCCURRED                           0x11
 
 /**
  * @format 1B1
@@ -480,12 +491,37 @@ typedef enum {
 
 #define HCI_EVENT_IO_CAPABILITY_REQUEST                    0x31
 #define HCI_EVENT_IO_CAPABILITY_RESPONSE                   0x32
+
+/**
+ * @format B4
+ * @param bd_addr
+ * @param numeric_value
+ */
 #define HCI_EVENT_USER_CONFIRMATION_REQUEST                0x33
+
+/**
+ * @format B
+ * @param bd_addr
+ */
 #define HCI_EVENT_USER_PASSKEY_REQUEST                     0x34
+
+/**
+ * @format B
+ * @param bd_addr
+ */
 #define HCI_EVENT_REMOTE_OOB_DATA_REQUEST                  0x35
+
+/**
+ * @format 1B
+ * @param status
+ * @param bd_addr
+ */
 #define HCI_EVENT_SIMPLE_PAIRING_COMPLETE                  0x36
 
 #define HCI_EVENT_LE_META                                  0x3E
+
+// last used HCI_EVENT in 2.1 is 0x3d
+// last used HCI_EVENT in 4.1 is 0x57
 
 #define HCI_EVENT_VENDOR_SPECIFIC                          0xFF
 
@@ -503,13 +539,96 @@ typedef enum {
  * @param master_clock_accuracy
  */
 #define HCI_SUBEVENT_LE_CONNECTION_COMPLETE                0x01
+
+// array of advertisements, not handled by event accessor generator
 #define HCI_SUBEVENT_LE_ADVERTISING_REPORT                 0x02
-#define HCI_SUBEVENT_LE_CONNECTION_UPDATE_COMPLETE         0x03
+
+/**
+ * @format 11H222
+ * @param subevent_code
+ * @param status
+ * @param connection_handle
+ * @param conn_interval
+ * @param conn_latency
+ */
+ #define HCI_SUBEVENT_LE_CONNECTION_UPDATE_COMPLETE         0x03
+
+/**
+ * @format 1HD2
+ * @param subevent_code
+ * @param connection_handle
+ * @param random_number
+ * @param encryption_diversifier
+ */
 #define HCI_SUBEVENT_LE_READ_REMOTE_USED_FEATURES_COMPLETE 0x04
+
+/**
+ * @format 1HD2
+ * @param subevent_code
+ * @param connection_handle
+ * @param random_number
+ * @param encryption_diversifier
+ */
 #define HCI_SUBEVENT_LE_LONG_TERM_KEY_REQUEST              0x05
-    
-// last used HCI_EVENT in 2.1 is 0x3d
-// last used HCI_EVENT in 4.1 is 0x57
+
+/**
+ * @format 1H2222
+ * @param subevent_code
+ * @param connection_handle
+ * @param interval_min
+ * @param interval_max
+ * @param latency
+ * @param timeout
+ */
+#define HCI_SUBEVENT_LE_REMOTE_CONNECTION_PARAMETER_REQUEST 0x06
+
+/**
+ * @format 1H2222
+ * @param subevent_code
+ * @param connection_handle
+ * @param max_tx_octets
+ * @param max_tx_time
+ * @param max_rx_octets
+ * @param max_rx_time
+ */
+#define HCI_SUBEVENT_LE_DATA_LENGTH_CHANGE 0x07
+
+/**
+ * @format 11QQ
+ * @param subevent_code
+ * @param status
+ * @param dhkey_x x coordinate of P256 public key
+ * @param dhkey_y y coordinate of P256 public key
+ */
+#define HCI_SUBEVENT_LE_READ_LOCAL_P256_PUBLIC_KEY_COMPLETE 0x08
+ /**
+ * @format 11QQ
+ * @param subevent_code
+ * @param status
+ * @param dhkey_x x coordinate of Diffie-Hellman key
+ * @param dhkey_y y coordinate of Diffie-Hellman key
+ */
+#define HCI_SUBEVENT_LE_GENERATE_DHKEY_COMPLETE            0x09
+
+/**
+ * @format 11H11BBB2221
+ * @param subevent_code
+ * @param status
+ * @param connection_handle
+ * @param role
+ * @param peer_address_type
+ * @param perr_addresss
+ * @param local_resolvable_private_addres
+ * @param peer_resolvable_private_addres
+ * @param conn_interval
+ * @param conn_latency
+ * @param supervision_timeout
+ * @param master_clock_accuracy
+ */
+#define HCI_SUBEVENT_LE_ENHANCED_CONNECTION_COMPLETE       0x0A
+
+// array of advertisements, not handled by event accessor generator
+#define HCI_SUBEVENT_LE_DIRECT_ADVERTISING_REPORT          0x0B
 
 /** 
  * L2CAP Layer
@@ -951,7 +1070,10 @@ typedef enum {
     SM_CODE_IDENTITY_INFORMATION,
     SM_CODE_IDENTITY_ADDRESS_INFORMATION,
     SM_CODE_SIGNING_INFORMATION,
-    SM_CODE_SECURITY_REQUEST
+    SM_CODE_SECURITY_REQUEST,
+    SM_CODE_PAIRING_PUBLIC_KEY,
+    SM_CODE_PAIRING_DHKEY_CHECK,
+    SM_CODE_KEYPRESS_NOTIFICATION,
 } SECURITY_MANAGER_COMMANDS;
 
 // IO Capability Values
@@ -964,14 +1086,17 @@ typedef enum {
 } io_capability_t;
 
 // Authentication requirement flags
-#define SM_AUTHREQ_NO_BONDING 0x00
-#define SM_AUTHREQ_BONDING 0x01
-#define SM_AUTHREQ_MITM_PROTECTION 0x04
+#define SM_AUTHREQ_NO_BONDING        0x00
+#define SM_AUTHREQ_BONDING           0x01
+#define SM_AUTHREQ_MITM_PROTECTION   0x04
+#define SM_AUTHREQ_SECURE_CONNECTION 0x08
+#define SM_AUTHREQ_KEYPRESS          0x10
 
 // Key distribution flags used by spec
-#define SM_KEYDIST_ENC_KEY 0X01
-#define SM_KEYDIST_ID_KEY  0x02
-#define SM_KEYDIST_SIGN    0x04
+#define SM_KEYDIST_ENC_KEY  0x01
+#define SM_KEYDIST_ID_KEY   0x02
+#define SM_KEYDIST_SIGN     0x04
+#define SM_KEYDIST_LINK_KEY 0x08
 
 // Key distribution flags used internally
 #define SM_KEYDIST_FLAG_ENCRYPTION_INFORMATION       0x01
@@ -981,9 +1106,10 @@ typedef enum {
 #define SM_KEYDIST_FLAG_SIGNING_IDENTIFICATION       0x10
 
 // STK Generation Methods
-#define SM_STK_GENERATION_METHOD_JUST_WORKS 0x01
-#define SM_STK_GENERATION_METHOD_OOB        0x02
-#define SM_STK_GENERATION_METHOD_PASSKEY    0x04
+#define SM_STK_GENERATION_METHOD_JUST_WORKS          0x01
+#define SM_STK_GENERATION_METHOD_OOB                 0x02
+#define SM_STK_GENERATION_METHOD_PASSKEY             0x04
+#define SM_STK_GENERATION_METHOD_NUMERIC_COMPARISON  0x08
 
 // Pairing Failed Reasons
 #define SM_REASON_RESERVED                     0x00
@@ -996,14 +1122,27 @@ typedef enum {
 #define SM_REASON_COMMAND_NOT_SUPPORTED        0x07
 #define SM_REASON_UNSPECIFIED_REASON           0x08
 #define SM_REASON_REPEATED_ATTEMPTS            0x09
+#define SM_REASON_INVALID_PARAMETERS           0x0a
+#define SM_REASON_DHKEY_CHECK_FAILED           0x0b
+#define SM_REASON_NUMERIC_COMPARISON_FAILED    0x0c
+
 // also, invalid parameters
 // and reserved
+
+// Keypress Notifications
+#define SM_KEYPRESS_PASSKEY_ENTRY_STARTED      0x00
+#define SM_KEYPRESS_PASSKEY_DIGIT_ENTERED      0x01
+#define SM_KEYPRESS_PASSKEY_DIGIT_ERASED       0x02
+#define SM_KEYPRESS_PASSKEY_CLEARED            0x03
+#define SM_KEYPRESS_PASSKEY_ENTRY_COMPLETED    0x04
+
 
 // Company identifiers / manufacturers
 #define COMPANY_ID_CAMBRIDGE_SILICON_RADIO     0x000A 
 #define COMPANY_ID_TEXAS_INSTRUMENTS_INC       0x000D
 #define COMPANY_ID_BROADCOM_CORPORATION        0x000F
 #define COMPANY_ID_ST_MICROELECTRONICS         0x0030
+#define COMPANY_ID_NORDIC_SEMICONDUCTOR_ASA    0x0059
 #define COMPANY_ID_EM_MICROELECTRONICS_MARIN   0x005A
 
 

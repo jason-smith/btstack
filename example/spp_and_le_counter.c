@@ -75,12 +75,16 @@ static btstack_packet_callback_registration_t hci_event_callback_registration;
  * @section Advertisements 
  *
  * @text The Flags attribute in the Advertisement Data indicates if a device is in dual-mode or not.
- * Flag 0x02 indicates LE General Discoverable, Dual-Mode device. See Listing advertisements.
+ * Flag 0x06 indicates LE General Discoverable, BR/EDR not supported although we're actually using BR/EDR.
+ * In the past, there have been problems with Anrdoid devices when the flag was not set.
+ * Setting it should prevent the remote implementation to try to use GATT over LE/EDR, which is not 
+ * implemented by BTstack. So, setting the flag seems like the safer choice (while it's technically incorrect).
  */
-/* LISTING_START(advertisements): Advertisement data: Flag 0x02 indicates a dual mode device */
+/* LISTING_START(advertisements): Advertisement data: Flag 0x06 indicates LE-only device */
 const uint8_t adv_data[] = {
-    // Flags: General Discoverable
-    0x02, 0x01, 0x02, 
+    // Flags general discoverable, BR/EDR not supported
+    0x02, 0x01, 0x06, 
+
     // Name
     0x0b, 0x09, 'L', 'E', ' ', 'C', 'o', 'u', 'n', 't', 'e', 'r', 
 };
@@ -95,6 +99,8 @@ uint8_t adv_data_len = sizeof(adv_data);
  */
 
 static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
+    UNUSED(channel);
+
     bd_addr_t event_addr;
     uint8_t   rfcomm_channel_nr;
     uint16_t  mtu;
@@ -176,12 +182,15 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
 // - if buffer != NULL, copy data and return number bytes copied
 // @param offset defines start of attribute value
 static uint16_t att_read_callback(hci_con_handle_t con_handle, uint16_t att_handle, uint16_t offset, uint8_t * buffer, uint16_t buffer_size){
+    UNUSED(con_handle);
+
     if (att_handle == ATT_CHARACTERISTIC_0000FF11_0000_1000_8000_00805F9B34FB_01_VALUE_HANDLE){
         if (buffer){
-            log_info("att_read_callback for Characteristic *FF11*, value %s", counter_string);
-            memcpy(buffer, &counter_string[offset], counter_string_len - offset);
+            memcpy(buffer, &counter_string[offset], buffer_size);
+            return buffer_size;
+        } else {
+            return counter_string_len;
         }
-        return counter_string_len - offset;
     }
     return 0;
 }
@@ -207,6 +216,12 @@ static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle, 
     }
 }
 
+static void beat(void){
+    counter++;
+    counter_string_len = sprintf(counter_string, "BTstack counter %04u", counter);
+    puts(counter_string);
+}
+
 /*
  * @section Heartbeat Handler
  * 
@@ -217,9 +232,9 @@ static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle, 
  /* LISTING_START(heartbeat): Combined Heartbeat handler */
 static void heartbeat_handler(struct btstack_timer_source *ts){
 
-    counter++;
-    counter_string_len = sprintf(counter_string, "BTstack counter %04u\n", counter);
-    // log_info("%s", counter_string);
+    if (rfcomm_channel_id || le_notification_enabled) {
+        beat();
+    }
 
     if (rfcomm_channel_id){
         rfcomm_request_can_send_now_event(rfcomm_channel_id);
@@ -228,6 +243,7 @@ static void heartbeat_handler(struct btstack_timer_source *ts){
     if (le_notification_enabled) {
         att_server_request_can_send_now_event(att_con_handle);
     }
+
     btstack_run_loop_set_timer(ts, HEARTBEAT_PERIOD_MS);
     btstack_run_loop_add_timer(ts);
 } 
@@ -287,6 +303,9 @@ int btstack_main(void)
     gap_advertisements_set_params(adv_int_min, adv_int_max, adv_type, 0, null_addr, 0x07, 0x00);
     gap_advertisements_set_data(adv_data_len, (uint8_t*) adv_data);
     gap_advertisements_enable(1);
+
+    // beat once
+    beat();
 
     // turn on!
 	hci_power_control(HCI_POWER_ON);

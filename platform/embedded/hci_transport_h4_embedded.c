@@ -59,7 +59,7 @@
 #error HCI_OUTGOING_PRE_BUFFER_SIZE not defined. Please update hci.h
 #endif
 
-#ifdef HAVE_EHCILL
+#ifdef ENABLE_EHCILL
 #error "HCI Transport H4 DMA does not support eHCILL. Please use hci_transport_h4_ehcill_dma.c instead."
 #endif 
 
@@ -123,6 +123,7 @@ static const hci_transport_h4_t hci_transport_h4_dma = {
   /*  .transport.can_send_packet_now           = */  h4_can_send_packet_now,
   /*  .transport.send_packet                   = */  h4_send_packet,
   /*  .transport.set_baudrate                  = */  h4_set_baudrate,
+  /*  .transport.reset_link                    = */  NULL,    
     },
   /*  .ds                                      = */  &hci_transport_h4_dma_ds
 };
@@ -156,7 +157,9 @@ static int h4_open(void){
 }
 
 static int h4_close(void){
-    // first remove run loop handler
+
+    // remove data source
+    btstack_run_loop_disable_data_source_callbacks(&hci_transport_h4_dma_ds, DATA_SOURCE_CALLBACK_POLL);
 	btstack_run_loop_remove_data_source(&hci_transport_h4_dma_ds);
     
     // close device 
@@ -216,7 +219,7 @@ static void h4_block_received(void){
             break;
         
         case H4_W4_SCO_HEADER:
-            bytes_to_read = hci_packet[2];
+            bytes_to_read = hci_packet[3];
             if (bytes_to_read == 0) {
                 h4_state = H4_PACKET_RECEIVED; 
                 break;
@@ -310,6 +313,6 @@ static void dummy_handler(uint8_t packet_type, uint8_t *packet, uint16_t size){
 }
 
 // get h4 singleton
-const hci_transport_t * hci_transport_h4_instance(void){ 
+const hci_transport_t * hci_transport_h4_instance(const btstack_uart_block_t * uart_driver){ 
     return &hci_transport_h4_dma.transport;
 }

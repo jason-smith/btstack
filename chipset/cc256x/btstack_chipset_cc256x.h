@@ -50,10 +50,20 @@ extern "C" {
 #include <stdint.h>
 #include "btstack_chipset.h"
 
-void btstack_chipset_cc256x_enable_ehcill(int on);
-int  btstack_chipset_cc256x_ehcill_enabled(void);
+/** 
+ * Configure output power before HCI POWER_ON
+ */
 void btstack_chipset_cc256x_set_power(int16_t power_in_dB);
+
+/**
+ * Get chipset instance for CC256x series
+ */
 const btstack_chipset_t * btstack_chipset_cc256x_instance(void);
+
+/**
+ * Get LMP Subversion of compile-time init script
+ */
+uint16_t btstack_chipset_cc256x_lmp_subversion(void);
 
 #if defined __cplusplus
 }

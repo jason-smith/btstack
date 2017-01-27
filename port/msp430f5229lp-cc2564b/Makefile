@@ -4,8 +4,8 @@
 #
 
 # init scripts
-CC2560B = bluetooth_init_cc2560B_1.2_BT_Spec_4.1.o
-CC2564B = bluetooth_init_cc2564B_1.2_BT_Spec_4.1.o
+CC2560B = bluetooth_init_cc2560B_1.4_BT_Spec_4.1.o
+CC2564B = bluetooth_init_cc2564B_1.4_BT_Spec_4.1.o
 CC2567  = CC256x_BT_Service_Pack_2.8_ANT_1.16.o
 
 BTSTACK_ROOT = ../..
@@ -56,6 +56,7 @@ COMMON = \
 	btstack_chipset_cc256x.c       \
     hci.c			          \
     hci_cmd.c		          \
+    btstack_uart_block_embedded.c \
     hci_transport_h4_ehcill_embedded.c \
 	btstack_link_key_db_memory.c \
 
@@ -96,7 +97,8 @@ BLE_OBJ    = $(BLE:.c=.o)
 # create firmware image from common objects and example source file
 
 all: led_counter.hex spp_counter.hex gap_inquiry.hex spp_flowcontrol.hex \
-	 sdp_rfcomm_query.hex sdp_general_query.hex ble_server.hex
+	 sdp_rfcomm_query.hex sdp_general_query.hex 
+# ble_server.hex
 
 # fetch and convert init scripts
 include ${BTSTACK_ROOT}/chipset/cc256x/Makefile.inc
@@ -130,7 +132,7 @@ spp_counter.out: ${CORE_OBJ} ${COMMON_OBJ} ${SPP_OBJ} ${CC2560B} spp_counter.o s
 spp_flowcontrol.out: ${CORE_OBJ} ${COMMON_OBJ} ${SPP_OBJ} ${CC2560B} spp_flowcontrol.o sdp_server.o
 	${CC} $^ ${LDFLAGS} -o $@
 
-gap_inquiry.out: ${CORE_OBJ} ${COMMON_OBJ} ${SPP_OBJ} ${CC2560B} gap_inquiry.o
+gap_inquiry.out: ${CORE_OBJ} ${COMMON_OBJ} ${SPP_OBJ} ${CC2560B} ad_parser.o gap_inquiry.o
 	${CC} $^ ${LDFLAGS} -o $@
 
 sdp_rfcomm_query.out: ${CORE_OBJ} ${COMMON_OBJ} ${SPP_OBJ} ${SDP_CLIENT} ${CC2560B} sdp_rfcomm_query.o

@@ -98,6 +98,7 @@ typedef struct le_connection_parameter_range{
 
 typedef enum {
     GAP_RANDOM_ADDRESS_TYPE_OFF = 0,
+    GAP_RANDOM_ADDRESS_TYPE_STATIC,
     GAP_RANDOM_ADDRESS_NON_RESOLVABLE,
     GAP_RANDOM_ADDRESS_RESOLVABLE,
 } gap_random_address_type_t;
@@ -127,6 +128,13 @@ gap_connection_type_t gap_get_connection_type(hci_con_handle_t connection_handle
  * @param name is not copied, make sure memory is accessible during stack startup
  */
 void gap_set_local_name(const char * local_name);
+
+/**
+ * @brief Set Extended Inquiry Response data
+ * @param eir_data size 240 bytes, is not copied make sure memory is accessible during stack startup
+ * @note has to be done before stack starts up
+ */
+void gap_set_extended_inquiry_response(const uint8_t * data); 
 
 /**
  * @brief Set class of device that will be set during Bluetooth init.
@@ -248,7 +256,7 @@ void gap_advertisements_set_params(uint16_t adv_int_min, uint16_t adv_int_max, u
 	uint8_t direct_address_typ, bd_addr_t direct_address, uint8_t channel_map, uint8_t filter_policy);
 
 /** 
- * @brief Enable/Disable Advertisements
+ * @brief Enable/Disable Advertisements. OFF by default.
  * @param enabled
  */
 void gap_advertisements_enable(int enabled);
@@ -353,8 +361,17 @@ void gap_local_bd_addr(bd_addr_t address_buffer);
 
 /**
  * @brief Deletes link key for remote device with baseband address.
+ * @param addr
  */
 void gap_drop_link_key_for_bd_addr(bd_addr_t addr);
+
+/** 
+ * @brief Store link key for remote device with baseband address
+ * @param addr
+ * @param link_key
+ * @param link_key_type
+ */
+void gap_store_link_key_for_bd_addr(bd_addr_t addr, link_key_t link_key, link_key_type_t type);
 
 // LE
 

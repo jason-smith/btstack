@@ -97,7 +97,7 @@ void mock_simulate_sm_data_packet(uint8_t * packet, uint16_t len){
 }
 
 void mock_simulate_command_complete(const hci_cmd_t *cmd){
-	uint8_t packet[] = {HCI_EVENT_COMMAND_COMPLETE, 4, 1, cmd->opcode & 0xff, cmd->opcode >> 8, 0};
+	uint8_t packet[] = {HCI_EVENT_COMMAND_COMPLETE, 4, 1, (uint8_t) cmd->opcode & 0xff, (uint8_t) cmd->opcode >> 8, 0};
 	mock_simulate_hci_event((uint8_t *)&packet, sizeof(packet));
 }
 
@@ -118,6 +118,12 @@ void att_init_connection(att_connection_t * att_connection){
 	att_connection->authorized = 0;
 }
 
+void gap_local_bd_addr(bd_addr_t address_buffer){
+	int i;
+	for (i=0;i<6;i++) {
+		address_buffer[i] = 0x11 * (i+1);
+	}
+}
 int hci_can_send_command_packet_now(void){
 	return 1;
 }
@@ -142,10 +148,17 @@ void gap_advertisements_get_address(uint8_t * addr_type, bd_addr_t addr){
     memcpy(addr, dummy, 6);
 }
 
- void hci_le_advertisements_set_params(uint16_t adv_int_min, uint16_t adv_int_max, uint8_t adv_type,
+void hci_le_advertisements_set_params(uint16_t adv_int_min, uint16_t adv_int_max, uint8_t adv_type,
     uint8_t own_address_type, uint8_t direct_address_typ, bd_addr_t direct_address,
     uint8_t channel_map, uint8_t filter_policy) {
  }
+
+uint16_t hci_get_manufacturer(void){
+ return 0xffff;
+};
+
+void hci_le_advertisements_set_own_address_type(uint8_t own_address){
+}
 
 extern "C" void l2cap_request_can_send_fix_channel_now_event(hci_con_handle_t con_handle, uint16_t cid){
 	if (packet_buffer_len) return;

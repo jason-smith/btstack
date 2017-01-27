@@ -95,11 +95,6 @@ void btstack_linked_list_add_tail(btstack_linked_list_t * list, btstack_linked_i
     it->next = item;
 }
 
-/**
- * Remove data_source from run loop
- *
- * @note: assumes that btstack_data_source_t.next is first element in data_source
- */
 int  btstack_linked_list_remove(btstack_linked_list_t * list, btstack_linked_item_t *item){    // <-- remove item from list
     if (!item) return -1;
     btstack_linked_item_t *it;
@@ -118,11 +113,25 @@ int  btstack_linked_list_remove(btstack_linked_list_t * list, btstack_linked_ite
  int btstack_linked_list_count(btstack_linked_list_t * list){
     btstack_linked_item_t *it;
     int counter = 0;
-    for (it = (btstack_linked_item_t *) list; it ; it = it->next) {
+    for (it = (btstack_linked_item_t *) list; it->next ; it = it->next) {
         counter++;
     }
     return counter; 
 }
+
+// get first element
+btstack_linked_item_t * btstack_linked_list_get_first_item(btstack_linked_list_t * list){
+    return * list;
+}
+
+// pop (get + remove) first element
+btstack_linked_item_t * btstack_linked_list_pop(btstack_linked_list_t * list){
+    btstack_linked_item_t * item = *list;
+    if (!item) return NULL;
+    *list = item->next;
+    return item;
+}
+
 
 //
 // Linked List Iterator implementation

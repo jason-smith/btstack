@@ -66,9 +66,6 @@ static btstack_linked_list_t bnep_channels = NULL;
 
 static gap_security_level_t bnep_security_level;
 
-static void (*app_packet_handler)(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size);
-
-
 static bnep_channel_t * bnep_channel_for_l2cap_cid(uint16_t l2cap_cid);
 static void bnep_channel_finalize(bnep_channel_t *channel);
 static void bnep_channel_start_timer(bnep_channel_t *channel, int timeout);
@@ -785,7 +782,7 @@ static void bnep_channel_finalize(bnep_channel_t *channel)
 static int bnep_handle_connection_request(bnep_channel_t *channel, uint8_t *packet, uint16_t size)
 {
     uint16_t uuid_size;
-    uint16_t uuid_offset;
+    uint16_t uuid_offset = 0; // avoid "may be unitialized when used" in clang
     uuid_size = packet[1];
     uint16_t response_code = BNEP_RESP_SETUP_SUCCESS;
     bnep_service_t * service;
@@ -1090,8 +1087,10 @@ static int bnep_handle_ethernet_packet(bnep_channel_t *channel, bd_addr_t addr_d
 #endif
     
     /* Notify application layer and deliver the ethernet packet */
-    (*app_packet_handler)(BNEP_DATA_PACKET, channel->uuid_source,
-                          ethernet_packet, size + sizeof(uint16_t) + 2 * sizeof(bd_addr_t));
+    if (channel->packet_handler){
+        (*channel->packet_handler)(BNEP_DATA_PACKET, channel->l2cap_cid, ethernet_packet,
+                                   size + sizeof(uint16_t) + 2 * sizeof(bd_addr_t));
+    }
     
     return size;
 }
@@ -1170,6 +1169,8 @@ static int bnep_handle_control_packet(bnep_channel_t *channel, uint8_t *packet, 
  */
 static int bnep_hci_event_handler(uint8_t *packet, uint16_t size)
 {
+    UNUSED(size);
+
     bd_addr_t event_addr;
     uint16_t  psm;
     uint16_t  l2cap_cid;
@@ -1193,7 +1194,7 @@ static int bnep_hci_event_handler(uint8_t *packet, uint16_t size)
 
             if (channel) {                
                 log_error("INCOMING_CONNECTION (l2cap_cid 0x%02x) for PSM_BNEP => decline - channel already exists", l2cap_cid);
-                l2cap_decline_connection(l2cap_cid,  0x04);    // no resources available
+                l2cap_decline_connection(l2cap_cid);
                 return 1;
             }
             
@@ -1202,7 +1203,7 @@ static int bnep_hci_event_handler(uint8_t *packet, uint16_t size)
 
             if (!channel) {
                 log_error("INCOMING_CONNECTION (l2cap_cid 0x%02x) for PSM_BNEP => decline - no memory left", l2cap_cid);
-                l2cap_decline_connection(l2cap_cid,  0x04);    // no resources available
+                l2cap_decline_connection(l2cap_cid);
                 return 1;
             }
 

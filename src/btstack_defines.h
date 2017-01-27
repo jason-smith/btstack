@@ -46,6 +46,10 @@
 #include <stdint.h>
 #include "btstack_linked_list.h" 
 
+
+// UNUSED macro
+#define UNUSED(x) (void)(sizeof(x))
+
 // TYPES
 
 // packet handler
@@ -56,6 +60,13 @@ typedef struct {
     btstack_linked_item_t    item;
     btstack_packet_handler_t callback;
 } btstack_packet_callback_registration_t;
+
+// context callback supporting multiple registrations
+typedef struct {
+  btstack_linked_item_t * item;
+  void (*callback)(void * context);
+  void * context;
+} btstack_context_callback_registration_t;
 
 /**
  * @brief 128 bit key used with AES128 in Security Manager
@@ -118,6 +129,8 @@ typedef uint8_t sm_key_t[16];
 
 #define L2CAP_SERVICE_ALREADY_REGISTERED                   0x69
 #define L2CAP_DATA_LEN_EXCEEDS_REMOTE_MTU                  0x6A
+#define L2CAP_SERVICE_DOES_NOT_EXIST                       0x6B
+#define L2CAP_LOCAL_CID_DOES_NOT_EXIST                     0x6C
     
 #define RFCOMM_MULTIPLEXER_STOPPED                         0x70
 #define RFCOMM_CHANNEL_ALREADY_REGISTERED                  0x71
@@ -367,7 +380,7 @@ typedef uint8_t sm_key_t[16];
 // L2CAP EVENTS
     
 /**
- * @format 1BH222222
+ * @format 1BH2222221
  * @param status
  * @param address
  * @param handle
@@ -377,6 +390,7 @@ typedef uint8_t sm_key_t[16];
  * @param local_mtu
  * @param remote_mtu
  * @param flush_timeout
+ * @param incoming
  */
 #define L2CAP_EVENT_CHANNEL_OPENED                         0x70
 
@@ -424,16 +438,65 @@ typedef uint8_t sm_key_t[16];
  */
 #define L2CAP_EVENT_CAN_SEND_NOW                           0x78
 
+// LE Data Channels
+
+/**
+ * @format 1BH2222
+ * @param address_type
+ * @param address
+ * @param handle
+ * @param psm
+ * @param local_cid
+ * @param remote_cid
+ * @param remote_mtu
+ */
+#define L2CAP_EVENT_LE_INCOMING_CONNECTION                 0x79
+
+/**
+ * @format 11BH122222
+ * @param status
+ * @param address_type
+ * @param address
+ * @param handle
+ * @param incoming
+ * @param psm
+ * @param local_cid
+ * @param remote_cid
+ * @param local_mtu
+ * @param remote_mtu
+ */
+#define L2CAP_EVENT_LE_CHANNEL_OPENED                      0x7a
+
+/*
+ * @format 2
+ * @param local_cid
+ */
+#define L2CAP_EVENT_LE_CHANNEL_CLOSED                      0x7b
+
+/*
+ * @format 2
+ * @param local_cid
+ */
+#define L2CAP_EVENT_LE_CAN_SEND_NOW                        0x7c
+
+/*
+ * @format 2
+ * @param local_cid
+ */
+#define L2CAP_EVENT_LE_PACKET_SENT                         0x7d
+
+
 // RFCOMM EVENTS
 
 /**
- * @format 1B2122
+ * @format 1B21221
  * @param status
  * @param bd_addr
  * @param con_handle
  * @param server_channel
  * @param rfcomm_cid
  * @param max_frame_size
+ * @param incoming
  */
 #define RFCOMM_EVENT_CHANNEL_OPENED                        0x80
 
@@ -735,12 +798,21 @@ typedef uint8_t sm_key_t[16];
 #define SM_EVENT_PASSKEY_INPUT_CANCEL                            0xD5
 
  /**
-  * @format H1B
+  * @format H1B4
+  * @param handle
+  * @param addr_type
+  * @param address
+  * @param passkey
+  */
+#define SM_EVENT_NUMERIC_COMPARISON_REQUEST                      0xD6
+
+ /**
+  * @format H1B4
   * @param handle
   * @param addr_type
   * @param address
   */
-#define SM_EVENT_IDENTITY_RESOLVING_STARTED                      0xD6
+#define SM_EVENT_NUMERIC_COMPARISON_CANCEL                       0xD7
 
  /**
   * @format H1B
@@ -748,16 +820,7 @@ typedef uint8_t sm_key_t[16];
   * @param addr_type
   * @param address
   */
-#define SM_EVENT_IDENTITY_RESOLVING_FAILED                       0xD7
-
- /**
-  * @format H1B2
-  * @param handle
-  * @param addr_type
-  * @param address
-  * @param le_device_db_index
-  */
-#define SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED                    0xD8
+#define SM_EVENT_IDENTITY_RESOLVING_STARTED                      0xD8
 
  /**
   * @format H1B
@@ -765,7 +828,29 @@ typedef uint8_t sm_key_t[16];
   * @param addr_type
   * @param address
   */
-#define SM_EVENT_AUTHORIZATION_REQUEST                           0xD9
+#define SM_EVENT_IDENTITY_RESOLVING_FAILED                       0xD9
+
+ /**
+  * @brief Identify resolving succeeded
+  *
+  * @format H1B1B2
+  * @param handle
+  * @param addr_type
+  * @param address
+  * @param identity_addr_type
+  * @param identity_address
+  * @param index_internal
+  *
+  */
+#define SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED                    0xDA
+
+ /**
+  * @format H1B
+  * @param handle
+  * @param addr_type
+  * @param address
+  */
+#define SM_EVENT_AUTHORIZATION_REQUEST                           0xDB
 
  /**
   * @format H1B1
@@ -774,7 +859,26 @@ typedef uint8_t sm_key_t[16];
   * @param address
   * @param authorization_result
   */
-#define SM_EVENT_AUTHORIZATION_RESULT                            0xDA
+#define SM_EVENT_AUTHORIZATION_RESULT                            0xDC
+
+ /**
+  * @format H1
+  * @param handle
+  * @param action see SM_KEYPRESS_*
+  */
+#define SM_EVENT_KEYPRESS_NOTIFICATION                           0xDD
+
+ /**
+  * @brief Emitted during pairing to inform app about address used as identity
+  *
+  * @format H1B1B
+  * @param handle
+  * @param addr_type
+  * @param address
+  * @param identity_addr_type
+  * @param identity_address
+  */
+#define SM_EVENT_IDENTITY_CREATED                                0xDE
 
 // GAP
 
@@ -890,10 +994,11 @@ typedef uint8_t sm_key_t[16];
 /** HFP Subevent */
 
 /**
- * @format 11H
+ * @format 11HB1
  * @param subevent_code
  * @param status 0 == OK
  * @param con_handle
+ * @param bd_addr
  */
 #define HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_ESTABLISHED  0x01
 
@@ -904,10 +1009,12 @@ typedef uint8_t sm_key_t[16];
 #define HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_RELEASED     0x02
 
 /**
- * @format 11H
+ * @format 11HB11
  * @param subevent_code
  * @param status 0 == OK
  * @param handle
+ * @param bd_addr
+ * @param negotiated_codec
  */
 #define HFP_SUBEVENT_AUDIO_CONNECTION_ESTABLISHED          0x03
 
@@ -948,13 +1055,6 @@ typedef uint8_t sm_key_t[16];
  * @param error
  */
 #define HFP_SUBEVENT_EXTENDED_AUDIO_GATEWAY_ERROR             0x08
-
-/**
- * @format 11
- * @param subevent_code
- * @param status
- */
-#define HFP_SUBEVENT_CODECS_CONNECTION_COMPLETE               0x09
 
 /**
  * @format 1

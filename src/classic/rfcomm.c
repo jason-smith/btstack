@@ -164,7 +164,7 @@ static void rfcomm_emit_channel_opened(rfcomm_channel_t *channel, uint8_t status
     log_info("RFCOMM_EVENT_CHANNEL_OPENED status 0x%x addr %s handle 0x%x channel #%u cid 0x%02x mtu %u",
              status, bd_addr_to_str(channel->multiplexer->remote_addr), channel->multiplexer->con_handle,
              channel->dlci>>1, channel->rfcomm_cid, channel->max_frame_size);
-    uint8_t event[16];
+    uint8_t event[18];
     uint8_t pos = 0;
     event[pos++] = RFCOMM_EVENT_CHANNEL_OPENED;  // 0
     event[pos++] = sizeof(event) - 2;                   // 1
@@ -174,6 +174,7 @@ static void rfcomm_emit_channel_opened(rfcomm_channel_t *channel, uint8_t status
 	event[pos++] = channel->dlci >> 1;                                      // 11
 	little_endian_store_16(event, pos, channel->rfcomm_cid); pos += 2;                 // 12 - channel ID
 	little_endian_store_16(event, pos, channel->max_frame_size); pos += 2;   // max frame size
+    event[pos++] = channel->service ? 1 : 0;    // linked to service -> incoming
     hci_dump_packet(HCI_EVENT_PACKET, 0, event, sizeof(event));
 	(channel->packet_handler)(HCI_EVENT_PACKET, 0, event, pos);
 
@@ -844,42 +845,40 @@ static void rfcomm_multiplexer_opened(rfcomm_multiplexer_t *multiplexer){
 
 static void rfcomm_handle_can_send_now(uint16_t l2cap_cid){
 
-    btstack_linked_list_iterator_t it;
+    log_debug("rfcomm_handle_can_send_now enter: %u", l2cap_cid);
 
-    // find multiplexer ready for this cid
+    btstack_linked_list_iterator_t it;
+    int token_consumed = 0;
+
+    // forward token to multiplexer
     btstack_linked_list_iterator_init(&it, &rfcomm_multiplexers);
-    while (btstack_linked_list_iterator_has_next(&it)){
+    while (!token_consumed && btstack_linked_list_iterator_has_next(&it)){
         rfcomm_multiplexer_t * multiplexer = (rfcomm_multiplexer_t *) btstack_linked_list_iterator_next(&it);
         if (multiplexer->l2cap_cid != l2cap_cid) continue;
         if (rfcomm_multiplexer_ready_to_send(multiplexer)){
+            log_debug("rfcomm_handle_can_send_now enter: multiplexer token");
+            token_consumed = 1;
             rfcomm_multiplexer_state_machine(multiplexer, MULT_EV_READY_TO_SEND);
-            // more to send?
-            if (rfcomm_multiplexer_ready_to_send(multiplexer)){
-                l2cap_request_can_send_now_event(l2cap_cid);
-            }
-            return;
         }
     }
 
-    // find channels ready for this cid
+    // forward token to channel state machine
     btstack_linked_list_iterator_init(&it, &rfcomm_channels);
-    while (btstack_linked_list_iterator_has_next(&it)){
+    while (!token_consumed && btstack_linked_list_iterator_has_next(&it)){
         rfcomm_channel_t * channel = (rfcomm_channel_t *) btstack_linked_list_iterator_next(&it);
         if (channel->multiplexer->l2cap_cid != l2cap_cid) continue;
         // channel state machine
         if (rfcomm_channel_ready_to_send(channel)){
+            log_debug("rfcomm_handle_can_send_now enter: channel token");
+            token_consumed = 1;
             const rfcomm_channel_event_t event = { CH_EVT_READY_TO_SEND };
             rfcomm_channel_state_machine_with_channel(channel, &event);
-            if (rfcomm_channel_ready_to_send(channel)){
-                l2cap_request_can_send_now_event(l2cap_cid);
-            }
-            return;
         }
     }
 
-    // inform clients if waiting
+    // forward token to client
     btstack_linked_list_iterator_init(&it, &rfcomm_channels);
-    while (btstack_linked_list_iterator_has_next(&it)){
+    while (!token_consumed && btstack_linked_list_iterator_has_next(&it)){
         rfcomm_channel_t * channel = (rfcomm_channel_t *) btstack_linked_list_iterator_next(&it);
         if (channel->multiplexer->l2cap_cid != l2cap_cid) continue;
         // client waiting for can send now
@@ -887,17 +886,18 @@ static void rfcomm_handle_can_send_now(uint16_t l2cap_cid){
         if (!channel->credits_outgoing)            continue;
         if ((channel->multiplexer->fcon & 1) == 0) continue;
 
+        log_debug("rfcomm_handle_can_send_now enter: client token");
+        token_consumed = 1;
         channel->waiting_for_can_send_now = 0;
         rfcomm_emit_can_send_now(channel);
-
-        // note: if client wants to send more, it will call rfcomm_request_can_send_now which in turn will
-        // call l2cap_request_can_send_now -> nothing to do for us here.
-
-        // check if we can still send
-        if (!l2cap_can_send_packet_now(l2cap_cid)) {
-            return;
-        }
     }
+
+    // if token was consumed, request another one
+    if (token_consumed) {
+        l2cap_request_can_send_now_event(l2cap_cid);
+    }
+
+    log_debug("rfcomm_handle_can_send_now exit");
 }
 
 static void rfcomm_multiplexer_set_state_and_request_can_send_now_event(rfcomm_multiplexer_t * multiplexer, RFCOMM_MULTIPLEXER_STATE state){
@@ -909,6 +909,8 @@ static void rfcomm_multiplexer_set_state_and_request_can_send_now_event(rfcomm_m
  * @return handled packet
  */
 static int rfcomm_hci_event_handler(uint8_t *packet, uint16_t size){
+    UNUSED(size);
+
     bd_addr_t event_addr;
     uint16_t  psm;
     uint16_t l2cap_cid;
@@ -932,7 +934,7 @@ static int rfcomm_hci_event_handler(uint8_t *packet, uint16_t size){
             
             if (multiplexer) {
                 log_info("INCOMING_CONNECTION (l2cap_cid 0x%02x) for PSM_RFCOMM => decline - multiplexer already exists", l2cap_cid);
-                l2cap_decline_connection(l2cap_cid,  0x04);    // no resources available
+                l2cap_decline_connection(l2cap_cid);
                 return 1;
             }
             
@@ -940,7 +942,7 @@ static int rfcomm_hci_event_handler(uint8_t *packet, uint16_t size){
             multiplexer = rfcomm_multiplexer_create_for_addr(event_addr);
             if (!multiplexer){
                 log_info("INCOMING_CONNECTION (l2cap_cid 0x%02x) for PSM_RFCOMM => decline - no memory left", l2cap_cid);
-                l2cap_decline_connection(l2cap_cid,  0x04);    // no resources available
+                l2cap_decline_connection(l2cap_cid); 
                 return 1;
             }
             
@@ -1027,20 +1029,10 @@ static int rfcomm_hci_event_handler(uint8_t *packet, uint16_t size){
             log_info("L2CAP_EVENT_CHANNEL_CLOSED cid 0x%0x, mult %p", l2cap_cid, multiplexer);
             if (!multiplexer) break;
             log_info("L2CAP_EVENT_CHANNEL_CLOSED state %u", multiplexer->state);
-            switch (multiplexer->state) {
-                case RFCOMM_MULTIPLEXER_W4_CONNECT:
-                case RFCOMM_MULTIPLEXER_SEND_SABM_0:
-                case RFCOMM_MULTIPLEXER_W4_SABM_0:
-                case RFCOMM_MULTIPLEXER_SEND_UA_0:
-                case RFCOMM_MULTIPLEXER_W4_UA_0:
-                case RFCOMM_MULTIPLEXER_OPEN:
-                    // don't call l2cap_disconnect as it's alreay closed
-                    rfcomm_multiplexer_finalize(multiplexer);
-                    return 1;
-                default:
-                    break;
-            }
-            break;
+            // no need to call l2cap_disconnect here, as it's already closed
+            rfcomm_multiplexer_finalize(multiplexer);
+            return 1;
+
         default:
             break;
     }
@@ -1048,6 +1040,7 @@ static int rfcomm_hci_event_handler(uint8_t *packet, uint16_t size){
 }
 
 static int rfcomm_multiplexer_l2cap_packet_handler(uint16_t channel, uint8_t *packet, uint16_t size){
+    UNUSED(size);
     
     // get or create a multiplexer for a certain device
     rfcomm_multiplexer_t *multiplexer = rfcomm_multiplexer_for_l2cap_cid(channel);
@@ -1242,8 +1235,8 @@ static void rfcomm_multiplexer_state_machine(rfcomm_multiplexer_t * multiplexer,
 // MARK: RFCOMM CHANNEL
 
 static void rfcomm_channel_send_credits(rfcomm_channel_t *channel, uint8_t credits){
-    rfcomm_send_uih_credits(channel->multiplexer, channel->dlci, credits);
     channel->credits_incoming += credits;
+    rfcomm_send_uih_credits(channel->multiplexer, channel->dlci, credits);
 }
 
 static int rfcomm_channel_can_send(rfcomm_channel_t * channel){
@@ -1413,7 +1406,8 @@ static void rfcomm_channel_state_machine_with_dlci(rfcomm_multiplexer_t * multip
 }
 
 static void rfcomm_channel_packet_handler(rfcomm_multiplexer_t * multiplexer,  uint8_t *packet, uint16_t size){
-    
+    UNUSED(size);
+        
     // rfcomm: (0) addr [76543 server channel] [2 direction: initiator uses 1] [1 C/R: CMD by initiator = 1] [0 EA=1]
     const uint8_t frame_dlci = packet[0] >> 2;
     uint8_t message_dlci; // used by commands in UIH(_PF) packets 
@@ -2197,6 +2191,7 @@ static uint8_t rfcomm_channel_create_internal(btstack_packet_handler_t packet_ha
     
     // create new multiplexer if necessary
     uint8_t status = 0;
+    uint8_t dlci = 0;
     int new_multiplexer = 0;
     rfcomm_channel_t * channel = NULL;
     rfcomm_multiplexer_t * multiplexer = rfcomm_multiplexer_for_addr(addr);
@@ -2211,6 +2206,14 @@ static uint8_t rfcomm_channel_create_internal(btstack_packet_handler_t packet_ha
         new_multiplexer = 1;
     }
     
+    // check if channel for this remote service already exists
+    dlci = (server_channel << 1) | (multiplexer->outgoing ^ 1);
+    channel = rfcomm_channel_for_multiplexer_and_dlci(multiplexer, dlci);
+    if (channel){
+        status = RFCOMM_CHANNEL_ALREADY_REGISTERED;
+        goto fail;
+    }
+
     // prepare channel
     channel = rfcomm_channel_create(multiplexer, NULL, server_channel);
     if (!channel){
@@ -2261,11 +2264,9 @@ uint8_t rfcomm_create_channel(btstack_packet_handler_t packet_handler, bd_addr_t
 void rfcomm_disconnect(uint16_t rfcomm_cid){
     log_info("RFCOMM_DISCONNECT cid 0x%02x", rfcomm_cid);
     rfcomm_channel_t * channel = rfcomm_channel_for_rfcomm_cid(rfcomm_cid);
-    if (channel) {
-        channel->state = RFCOMM_CHANNEL_SEND_DISC;
-    }
-    
-    // process
+    if (!channel) return;
+
+    channel->state = RFCOMM_CHANNEL_SEND_DISC;
     l2cap_request_can_send_now_event(channel->multiplexer->l2cap_cid);
 }
 

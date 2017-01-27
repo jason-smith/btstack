@@ -15,8 +15,9 @@ LIBUSB_CFLAGS = @LIBUSB_CFLAGS@
 LIBUSB_LDFLAGS = @LIBUSB_LDFLAGS@
 
 VPATH += ${BTSTACK_ROOT}/platform/daemon/src
-VPATH += ${BTSTACK_ROOT}/platform/posix
 VPATH += ${BTSTACK_ROOT}/platform/corefoundation
+VPATH += ${BTSTACK_ROOT}/platform/libusb
+VPATH += ${BTSTACK_ROOT}/platform/posix
 VPATH += ${BTSTACK_ROOT}/src
 VPATH += ${BTSTACK_ROOT}/src/ble
 VPATH += ${BTSTACK_ROOT}/src/classic
@@ -39,7 +40,8 @@ libBTstack_SOURCES =    \
 			  
 BTdaemon_SOURCES =      \
     daemon.c            \
-    hci_transport_h4_posix.c  \
+    btstack_uart_block_posix.c \
+    hci_transport_h4.c  \
     $(libBTstack_SOURCES) \
     btstack_memory.c    \
     hci.c               \

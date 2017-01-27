@@ -129,20 +129,31 @@ int send_str_over_rfcomm(uint16_t cid, char * command){
     return 1;
 }
 
-#if 0
-void hfp_set_codec(hfp_connection_t * hfp_connection, uint8_t *packet, uint16_t size){
-    // parse available codecs
-    int pos = 0;
+int hfp_supports_codec(uint8_t codec, int codecs_nr, uint8_t * codecs){
+
+    // mSBC requires support for eSCO connections
+    if (codec == HFP_CODEC_MSBC && !hci_extended_sco_link_supported()) return 0;
+
     int i;
-    for (i=0; i<size; i++){
-        pos+=8;
-        if (packet[pos] > hfp_connection->negotiated_codec){
-            hfp_connection->negotiated_codec = packet[pos];
-        }
+    for (i = 0; i < codecs_nr; i++){
+        if (codecs[i] != codec) continue;
+        return 1;
     }
-    printf("Negotiated Codec 0x%02x\n", hfp_connection->negotiated_codec);
+    return 0;
 }
-#endif
+
+void hfp_hf_drop_mSBC_if_eSCO_not_supported(uint8_t * codecs, uint8_t * codecs_nr){
+    if (hci_extended_sco_link_supported()) return;
+    uint8_t tmp_codecs[HFP_MAX_NUM_CODECS];
+    int i;
+    int tmp_codec_nr = 0;
+    for (i=0; i < *codecs_nr; i++){
+        if (codecs[i] == HFP_CODEC_MSBC) continue;
+        tmp_codecs[tmp_codec_nr++] = codecs[i];
+    }
+    *codecs_nr = tmp_codec_nr;
+    memcpy(codecs, tmp_codecs, tmp_codec_nr);
+}
 
 // UTILS
 int get_bit(uint16_t bitmap, int position){
@@ -205,14 +216,34 @@ void hfp_emit_event(btstack_packet_handler_t callback, uint8_t event_subtype, ui
     (*callback)(HCI_EVENT_PACKET, 0, event, sizeof(event));
 }
 
-void hfp_emit_connection_event(btstack_packet_handler_t callback, uint8_t event_subtype, uint8_t status, hci_con_handle_t con_handle){
+void hfp_emit_slc_connection_event(btstack_packet_handler_t callback, uint8_t status, hci_con_handle_t con_handle, bd_addr_t addr){
     if (!callback) return;
-    uint8_t event[6];
-    event[0] = HCI_EVENT_HFP_META;
-    event[1] = sizeof(event) - 2;
-    event[2] = event_subtype;
-    event[3] = status; // status 0 == OK
-    little_endian_store_16(event, 4, con_handle);
+    uint8_t event[12];
+    int pos = 0;
+    event[pos++] = HCI_EVENT_HFP_META;
+    event[pos++] = sizeof(event) - 2;
+    event[pos++] = HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_ESTABLISHED;
+    event[pos++] = status; // status 0 == OK
+    little_endian_store_16(event, pos, con_handle);
+    pos += 2;
+    reverse_bd_addr(addr,&event[pos]);
+    pos += 6;
+    (*callback)(HCI_EVENT_PACKET, 0, event, sizeof(event));
+}
+
+static void hfp_emit_sco_event(btstack_packet_handler_t callback, uint8_t status, hci_con_handle_t con_handle, bd_addr_t addr, uint8_t  negotiated_codec){
+    if (!callback) return;
+    uint8_t event[13];
+    int pos = 0;
+    event[pos++] = HCI_EVENT_HFP_META;
+    event[pos++] = sizeof(event) - 2;
+    event[pos++] = HFP_SUBEVENT_AUDIO_CONNECTION_ESTABLISHED;
+    event[pos++] = status; // status 0 == OK
+    little_endian_store_16(event, pos, con_handle);
+    pos += 2;
+    reverse_bd_addr(addr,&event[pos]);
+    pos += 6;
+    event[pos++] = negotiated_codec;
     (*callback)(HCI_EVENT_PACKET, 0, event, sizeof(event));
 }
 
@@ -222,7 +253,7 @@ void hfp_emit_string_event(btstack_packet_handler_t callback, uint8_t event_subt
     event[0] = HCI_EVENT_HFP_META;
     event[1] = sizeof(event) - 2;
     event[2] = event_subtype;
-    int size = (strlen(value) < sizeof(event) - 4) ? strlen(value) : sizeof(event) - 4;
+    int size = (strlen(value) < sizeof(event) - 4) ? (int) strlen(value) : sizeof(event) - 4;
     strncpy((char*)&event[3], value, size);
     event[3 + size] = 0;
     (*callback)(HCI_EVENT_PACKET, 0, event, sizeof(event));
@@ -262,6 +293,18 @@ hfp_connection_t * get_hfp_connection_context_for_sco_handle(uint16_t handle){
     while (btstack_linked_list_iterator_has_next(&it)){
         hfp_connection_t * hfp_connection = (hfp_connection_t *)btstack_linked_list_iterator_next(&it);
         if (hfp_connection->sco_handle == handle){
+            return hfp_connection;
+        }
+    }
+    return NULL;
+}
+
+hfp_connection_t * get_hfp_connection_context_for_acl_handle(uint16_t handle){
+    btstack_linked_list_iterator_t it;    
+    btstack_linked_list_iterator_init(&it, hfp_get_connections());
+    while (btstack_linked_list_iterator_has_next(&it)){
+        hfp_connection_t * hfp_connection = (hfp_connection_t *)btstack_linked_list_iterator_next(&it);
+        if (hfp_connection->acl_handle == handle){
             return hfp_connection;
         }
     }
@@ -319,7 +362,6 @@ static hfp_connection_t * provide_hfp_connection_context_for_bd_addr(bd_addr_t b
     hfp_connection_t * hfp_connection = get_hfp_connection_context_for_bd_addr(bd_addr);
     if (hfp_connection) return  hfp_connection;
     hfp_connection = create_hfp_connection_context();
-    printf("created hfp_connection for address %s\n", bd_addr_to_str(bd_addr));
     memcpy(hfp_connection->remote_addr, bd_addr, 6);
     return hfp_connection;
 }
@@ -413,6 +455,10 @@ void hfp_create_sdp_record(uint8_t * service, uint32_t service_record_handle, ui
 static hfp_connection_t * connection_doing_sdp_query = NULL;
 
 static void handle_query_rfcomm_event(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
+    UNUSED(packet_type);
+    UNUSED(channel);
+    UNUSED(size);
+
     hfp_connection_t * hfp_connection = connection_doing_sdp_query;
     
     if ( hfp_connection->state != HFP_W4_SDP_QUERY_COMPLETE) return;
@@ -461,13 +507,23 @@ static void hfp_handle_failed_sco_connection(uint8_t status){
             sco_establishment_active->link_setting = HFP_LINK_SETTINGS_D1;
             break;                    
         case HFP_LINK_SETTINGS_S2:
-        case HFP_LINK_SETTINGS_S3:
-        case HFP_LINK_SETTINGS_S4:
             sco_establishment_active->link_setting = HFP_LINK_SETTINGS_S1;
             break;
-        case HFP_LINK_SETTINGS_T1:
-        case HFP_LINK_SETTINGS_T2:
+        case HFP_LINK_SETTINGS_S3:
+            sco_establishment_active->link_setting = HFP_LINK_SETTINGS_S2;
+            break;
+        case HFP_LINK_SETTINGS_S4:
             sco_establishment_active->link_setting = HFP_LINK_SETTINGS_S3;
+            break;
+        case HFP_LINK_SETTINGS_T1:
+            log_info("T1 failed, fallback to CVSD - D1");
+            sco_establishment_active->negotiated_codec = HFP_CODEC_CVSD;
+            sco_establishment_active->sco_for_msbc_failed = 1;
+            sco_establishment_active->command = HFP_CMD_AG_SEND_COMMON_CODEC;
+            sco_establishment_active->link_setting = HFP_LINK_SETTINGS_D1;
+            break;
+        case HFP_LINK_SETTINGS_T2:
+            sco_establishment_active->link_setting = HFP_LINK_SETTINGS_T1;
             break;
     }
     sco_establishment_active->establish_audio_connection = 1;
@@ -476,6 +532,8 @@ static void hfp_handle_failed_sco_connection(uint8_t status){
 
 
 void hfp_handle_hci_event(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
+    UNUSED(channel);
+
     bd_addr_t event_addr;
     uint16_t rfcomm_cid, handle;
     hfp_connection_t * hfp_connection = NULL;
@@ -484,6 +542,20 @@ void hfp_handle_hci_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
     log_info("AG packet_handler type %u, event type %x, size %u", packet_type, hci_event_packet_get_type(packet), size);
 
     switch (hci_event_packet_get_type(packet)) {
+        case HCI_EVENT_CONNECTION_REQUEST:
+            // printf("hfp HCI_EVENT_CONNECTION_REQUEST\n");
+            switch(hci_event_connection_request_get_link_type(packet)){
+                case 0: //  SCO
+                case 2: // eSCO
+                    hci_event_connection_request_get_bd_addr(packet, event_addr);
+                    hfp_connection = get_hfp_connection_context_for_bd_addr(event_addr);
+                    if (!hfp_connection) break;
+                    hfp_connection->hf_accept_sco = 1;
+                    break;
+                default:
+                    break;                    
+            }            
+            break;
         
         case RFCOMM_EVENT_INCOMING_CONNECTION:
             // data: event (8), len(8), address(48), channel (8), rfcomm_cid (16)
@@ -502,17 +574,17 @@ void hfp_handle_hci_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
 
             rfcomm_event_channel_opened_get_bd_addr(packet, event_addr); 
             status = rfcomm_event_channel_opened_get_status(packet);          
-            // printf("RFCOMM_EVENT_CHANNEL_OPENED packet_handler adddr %s, status %u\n", bd_addr_to_str(event_addr), status);
-
+            
             hfp_connection = get_hfp_connection_context_for_bd_addr(event_addr);
             if (!hfp_connection || hfp_connection->state != HFP_W4_RFCOMM_CONNECTED) return;
 
             if (status) {
-                hfp_emit_connection_event(hfp_callback, HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_ESTABLISHED, status, rfcomm_event_channel_opened_get_con_handle(packet));
+                hfp_emit_slc_connection_event(hfp_callback, status, rfcomm_event_channel_opened_get_con_handle(packet), event_addr);
                 remove_hfp_connection_context(hfp_connection);
             } else {
                 hfp_connection->acl_handle = rfcomm_event_channel_opened_get_con_handle(packet);
                 hfp_connection->rfcomm_cid = rfcomm_event_channel_opened_get_rfcomm_cid(packet);
+                bd_addr_copy(hfp_connection->remote_addr, event_addr);
                 // uint16_t mtu = rfcomm_event_channel_opened_get_max_frame_size(packet);
                 // printf("RFCOMM channel open succeeded. hfp_connection %p, RFCOMM Channel ID 0x%02x, max frame size %u\n", hfp_connection, hfp_connection->rfcomm_cid, mtu);
                         
@@ -541,30 +613,27 @@ void hfp_handle_hci_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
             break;
 
         case HCI_EVENT_SYNCHRONOUS_CONNECTION_COMPLETE:{
-
-            reverse_bd_addr(&packet[5], event_addr);
-            int index = 2;
-            status = packet[index++];
-
+            hci_event_synchronous_connection_complete_get_bd_addr(packet, event_addr);
+            hfp_connection = get_hfp_connection_context_for_bd_addr(event_addr);
+            if (!hfp_connection) {
+                log_error("HFP: connection does not exist for remote with addr %s.", bd_addr_to_str(event_addr));
+                return;
+            }
+            
+            status = hci_event_synchronous_connection_complete_get_status(packet);
             if (status != 0){
+                hfp_connection->hf_accept_sco = 0;
                 hfp_handle_failed_sco_connection(status);
                 break;
             }
             
-            uint16_t sco_handle = little_endian_read_16(packet, index);
-            index+=2;
-
-            reverse_bd_addr(&packet[index], event_addr);
-            index+=6;
-
-            uint8_t link_type = packet[index++];
-            uint8_t transmission_interval = packet[index++];  // measured in slots
-            uint8_t retransmission_interval = packet[index++];// measured in slots
-            uint16_t rx_packet_length = little_endian_read_16(packet, index); // measured in bytes
-            index+=2;
-            uint16_t tx_packet_length = little_endian_read_16(packet, index); // measured in bytes
-            index+=2;
-            uint8_t air_mode = packet[index];
+            uint16_t sco_handle = hci_event_synchronous_connection_complete_get_handle(packet);
+            uint8_t  link_type = hci_event_synchronous_connection_complete_get_link_type(packet);
+            uint8_t  transmission_interval = hci_event_synchronous_connection_complete_get_transmission_interval(packet);  // measured in slots
+            uint8_t  retransmission_interval = hci_event_synchronous_connection_complete_get_retransmission_interval(packet);// measured in slots
+            uint16_t rx_packet_length = hci_event_synchronous_connection_complete_get_rx_packet_length(packet); // measured in bytes
+            uint16_t tx_packet_length = hci_event_synchronous_connection_complete_get_tx_packet_length(packet); // measured in bytes
+            uint8_t  air_mode = hci_event_synchronous_connection_complete_get_air_mode(packet);
 
             switch (link_type){
                 case 0x00:
@@ -600,7 +669,7 @@ void hfp_handle_hci_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
             hfp_connection->sco_handle = sco_handle;
             hfp_connection->establish_audio_connection = 0;
             hfp_connection->state = HFP_AUDIO_CONNECTION_ESTABLISHED;
-            hfp_emit_connection_event(hfp_callback, HFP_SUBEVENT_AUDIO_CONNECTION_ESTABLISHED, packet[2], sco_handle);
+            hfp_emit_sco_event(hfp_callback, packet[2], sco_handle, event_addr, hfp_connection->negotiated_codec);
             break;                
         }
 
@@ -1007,30 +1076,30 @@ void hfp_parse(hfp_connection_t * hfp_connection, uint8_t byte, int isHandsFree)
             switch (hfp_connection->command){
                 case HFP_CMD_QUERY_OPERATOR_SELECTION_NAME:
                     log_info("format %s, ", hfp_connection->line_buffer);
-                    hfp_connection->network_operator.format =  atoi((char *)&hfp_connection->line_buffer[0]);
+                    hfp_connection->network_operator.format =  btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     break;
                 case HFP_CMD_QUERY_OPERATOR_SELECTION_NAME_FORMAT:
                     log_info("format %s \n", hfp_connection->line_buffer);
-                    hfp_connection->network_operator.format =  atoi((char *)&hfp_connection->line_buffer[0]);
+                    hfp_connection->network_operator.format =  btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     break;
                 case HFP_CMD_LIST_GENERIC_STATUS_INDICATORS:
                 case HFP_CMD_RETRIEVE_GENERIC_STATUS_INDICATORS:
                 case HFP_CMD_RETRIEVE_GENERIC_STATUS_INDICATORS_STATE:
-                    hfp_connection->generic_status_indicators[hfp_connection->parser_item_index].state = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+                    hfp_connection->generic_status_indicators[hfp_connection->parser_item_index].state = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
                     break;
                 case HFP_CMD_TRANSFER_AG_INDICATOR_STATUS:
-                    hfp_connection->ag_indicators[hfp_connection->parser_item_index].status = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+                    hfp_connection->ag_indicators[hfp_connection->parser_item_index].status = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
                     log_info("%d \n", hfp_connection->ag_indicators[hfp_connection->parser_item_index].status);
                     hfp_connection->ag_indicators[hfp_connection->parser_item_index].status_changed = 1;
                     break;
                 case HFP_CMD_RETRIEVE_AG_INDICATORS:
-                    hfp_connection->ag_indicators[hfp_connection->parser_item_index].min_range = atoi((char *)hfp_connection->line_buffer);
+                    hfp_connection->ag_indicators[hfp_connection->parser_item_index].min_range = btstack_atoi((char *)hfp_connection->line_buffer);
                     log_info("%s, ", hfp_connection->line_buffer);
                     break;
                 case HFP_CMD_AG_SENT_PHONE_NUMBER:
                 case HFP_CMD_AG_SENT_CALL_WAITING_NOTIFICATION_UPDATE:
                 case HFP_CMD_AG_SENT_CLIP_INFORMATION:
-                    hfp_connection->bnip_type = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+                    hfp_connection->bnip_type = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
                     break;
                 default:
                     break;
@@ -1044,7 +1113,7 @@ void hfp_parse(hfp_connection_t * hfp_connection, uint8_t byte, int isHandsFree)
                     log_info("name %s\n", hfp_connection->line_buffer);
                     break;
                 case HFP_CMD_RETRIEVE_AG_INDICATORS:
-                    hfp_connection->ag_indicators[hfp_connection->parser_item_index].max_range = atoi((char *)hfp_connection->line_buffer);
+                    hfp_connection->ag_indicators[hfp_connection->parser_item_index].max_range = btstack_atoi((char *)hfp_connection->line_buffer);
                     hfp_connection->parser_item_index++;
                     hfp_connection->ag_indicators_nr = hfp_connection->parser_item_index;
                     log_info("%s)\n", hfp_connection->line_buffer);
@@ -1069,7 +1138,7 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
     int value;
     switch (hfp_connection->command){
         case HFP_CMD_SET_GENERIC_STATUS_INDICATOR_STATUS:
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             int i;
             switch (hfp_connection->parser_item_index){
                 case 0:
@@ -1099,7 +1168,7 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
                     hfp_connection->bnip_number[sizeof(hfp_connection->bnip_number)-1] = 0;
                     break;
                 case 1:
-                    value = atoi((char *)&hfp_connection->line_buffer[0]);
+                    value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     hfp_connection->bnip_type = value;
                     break;
                 default:
@@ -1110,19 +1179,19 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
         case HFP_CMD_LIST_CURRENT_CALLS:
             switch(hfp_connection->parser_item_index){
                 case 0:
-                    value = atoi((char *)&hfp_connection->line_buffer[0]);
+                    value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     hfp_connection->clcc_idx = value;
                     break;
                 case 1:
-                    value = atoi((char *)&hfp_connection->line_buffer[0]);
+                    value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     hfp_connection->clcc_dir = value;
                     break;
                 case 2:
-                    value = atoi((char *)&hfp_connection->line_buffer[0]);
+                    value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     hfp_connection->clcc_status = value;
                     break;
                 case 3:
-                    value = atoi((char *)&hfp_connection->line_buffer[0]);
+                    value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     hfp_connection->clcc_mpty = value;
                     break;
                 case 4:
@@ -1130,7 +1199,7 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
                     hfp_connection->bnip_number[sizeof(hfp_connection->bnip_number)-1] = 0;
                     break;
                 case 5:
-                    value = atoi((char *)&hfp_connection->line_buffer[0]);
+                    value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                     hfp_connection->bnip_type = value;
                     break;
                 default:
@@ -1139,45 +1208,45 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
             hfp_connection->parser_item_index++;
             break;
         case HFP_CMD_SET_MICROPHONE_GAIN:
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             hfp_connection->microphone_gain = value;
             log_info("hfp parse HFP_CMD_SET_MICROPHONE_GAIN %d\n", value);
             break;
         case HFP_CMD_SET_SPEAKER_GAIN:
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             hfp_connection->speaker_gain = value;
             log_info("hfp parse HFP_CMD_SET_SPEAKER_GAIN %d\n", value);
             break;
         case HFP_CMD_HF_ACTIVATE_VOICE_RECOGNITION:
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             hfp_connection->ag_activate_voice_recognition = value;
             log_info("hfp parse HFP_CMD_HF_ACTIVATE_VOICE_RECOGNITION %d\n", value);
             break;
         case HFP_CMD_TURN_OFF_EC_AND_NR:
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             hfp_connection->ag_echo_and_noise_reduction = value;
             log_info("hfp parse HFP_CMD_TURN_OFF_EC_AND_NR %d\n", value);
             break;
         case HFP_CMD_CHANGE_IN_BAND_RING_TONE_SETTING:
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             hfp_connection->remote_supported_features = store_bit(hfp_connection->remote_supported_features, HFP_AGSF_IN_BAND_RING_TONE, value);
             log_info("hfp parse HFP_CHANGE_IN_BAND_RING_TONE_SETTING %d\n", value);
             break;
         case HFP_CMD_HF_CONFIRMED_CODEC:
-            hfp_connection->codec_confirmed = atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->codec_confirmed = btstack_atoi((char*)hfp_connection->line_buffer);
             log_info("hfp parse HFP_CMD_HF_CONFIRMED_CODEC %d\n", hfp_connection->codec_confirmed);
             break;
         case HFP_CMD_AG_SUGGESTED_CODEC:
-            hfp_connection->suggested_codec = atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->suggested_codec = btstack_atoi((char*)hfp_connection->line_buffer);
             log_info("hfp parse HFP_CMD_AG_SUGGESTED_CODEC %d\n", hfp_connection->suggested_codec);
             break;
         case HFP_CMD_SUPPORTED_FEATURES:
-            hfp_connection->remote_supported_features = atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->remote_supported_features = btstack_atoi((char*)hfp_connection->line_buffer);
             log_info("Parsed supported feature %d\n", hfp_connection->remote_supported_features);
             break;
         case HFP_CMD_AVAILABLE_CODECS:
             log_info("Parsed codec %s\n", hfp_connection->line_buffer);
-            hfp_connection->remote_codecs[hfp_connection->parser_item_index] = (uint16_t)atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->remote_codecs[hfp_connection->parser_item_index] = (uint16_t)btstack_atoi((char*)hfp_connection->line_buffer);
             hfp_connection->parser_item_index++;
             hfp_connection->remote_codecs_nr = hfp_connection->parser_item_index;
             break;
@@ -1188,14 +1257,14 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
             break;
         case HFP_CMD_RETRIEVE_AG_INDICATORS_STATUS:
             log_info("Parsed Indicator %d with status: %s\n", hfp_connection->parser_item_index+1, hfp_connection->line_buffer);
-            hfp_connection->ag_indicators[hfp_connection->parser_item_index].status = atoi((char *) hfp_connection->line_buffer);
+            hfp_connection->ag_indicators[hfp_connection->parser_item_index].status = btstack_atoi((char *) hfp_connection->line_buffer);
             hfp_connection->parser_item_index++;
             break;
         case HFP_CMD_ENABLE_INDICATOR_STATUS_UPDATE:
             hfp_connection->parser_item_index++;
             if (hfp_connection->parser_item_index != 4) break;
             log_info("Parsed Enable indicators: %s\n", hfp_connection->line_buffer);
-            value = atoi((char *)&hfp_connection->line_buffer[0]);
+            value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             hfp_connection->enable_status_update_for_ag_indicators = (uint8_t) value;
             break;
         case HFP_CMD_SUPPORT_CALL_HOLD_AND_MULTIPARTY_SERVICES:
@@ -1207,17 +1276,17 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
         case HFP_CMD_LIST_GENERIC_STATUS_INDICATORS:
         case HFP_CMD_RETRIEVE_GENERIC_STATUS_INDICATORS:
             log_info("Parsed Generic status indicator: %s\n", hfp_connection->line_buffer);
-            hfp_connection->generic_status_indicators[hfp_connection->parser_item_index].uuid = (uint16_t)atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->generic_status_indicators[hfp_connection->parser_item_index].uuid = (uint16_t)btstack_atoi((char*)hfp_connection->line_buffer);
             hfp_connection->parser_item_index++;
             hfp_connection->generic_status_indicators_nr = hfp_connection->parser_item_index;
             break;
         case HFP_CMD_RETRIEVE_GENERIC_STATUS_INDICATORS_STATE:
             // HF parses inital AG gen. ind. state
             log_info("Parsed List generic status indicator %s state: ", hfp_connection->line_buffer);
-            hfp_connection->parser_item_index = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->parser_item_index = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
             break;
         case HFP_CMD_HF_INDICATOR_STATUS:
-            hfp_connection->parser_indicator_index = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->parser_indicator_index = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
             log_info("Parsed HF indicator index %u", hfp_connection->parser_indicator_index);
             break;
         case HFP_CMD_ENABLE_INDIVIDUAL_AG_INDICATOR_STATUS_UPDATE:
@@ -1231,7 +1300,7 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
                 log_info("Parsed Enable AG indicator pos %u('%s') - ignore (mandatory)\n", 
                     hfp_connection->parser_item_index, hfp_connection->ag_indicators[hfp_connection->parser_item_index].name);
             } else {
-                value = atoi((char *)&hfp_connection->line_buffer[0]);
+                value = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
                 hfp_connection->ag_indicators[hfp_connection->parser_item_index].enabled = value;
                 log_info("Parsed Enable AG indicator pos %u('%s'): %u\n", hfp_connection->parser_item_index,
                     hfp_connection->ag_indicators[hfp_connection->parser_item_index].name, value);
@@ -1240,11 +1309,11 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
             break;
         case HFP_CMD_TRANSFER_AG_INDICATOR_STATUS:
             // indicators are indexed starting with 1
-            hfp_connection->parser_item_index = atoi((char *)&hfp_connection->line_buffer[0]) - 1;
+            hfp_connection->parser_item_index = btstack_atoi((char *)&hfp_connection->line_buffer[0]) - 1;
             log_info("Parsed status of the AG indicator %d, status ", hfp_connection->parser_item_index);
             break;
         case HFP_CMD_QUERY_OPERATOR_SELECTION_NAME:
-            hfp_connection->network_operator.mode = atoi((char *)&hfp_connection->line_buffer[0]);
+            hfp_connection->network_operator.mode = btstack_atoi((char *)&hfp_connection->line_buffer[0]);
             log_info("Parsed network operator mode: %d, ", hfp_connection->network_operator.mode);
             break;
         case HFP_CMD_QUERY_OPERATOR_SELECTION_NAME_FORMAT:
@@ -1259,10 +1328,10 @@ static void parse_sequence(hfp_connection_t * hfp_connection){
             break;
         case HFP_CMD_EXTENDED_AUDIO_GATEWAY_ERROR:
             hfp_connection->extended_audio_gateway_error = 1;
-            hfp_connection->extended_audio_gateway_error_value = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->extended_audio_gateway_error_value = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
             break;
         case HFP_CMD_ENABLE_EXTENDED_AUDIO_GATEWAY_ERROR:
-            hfp_connection->enable_extended_audio_gateway_error_report = (uint8_t)atoi((char*)hfp_connection->line_buffer);
+            hfp_connection->enable_extended_audio_gateway_error_report = (uint8_t)btstack_atoi((char*)hfp_connection->line_buffer);
             hfp_connection->ok_pending = 1;
             hfp_connection->extended_audio_gateway_error = 0;
             break;
@@ -1358,8 +1427,12 @@ void hfp_setup_synchronous_connection(hfp_connection_t * hfp_connection){
     int setting = hfp_connection->link_setting;
     log_info("hfp_setup_synchronous_connection using setting nr %u", setting);
     sco_establishment_active = hfp_connection;
+    uint16_t sco_voice_setting = hci_get_sco_voice_setting();
+    if (hfp_connection->negotiated_codec == HFP_CODEC_MSBC){
+        sco_voice_setting = 0x0043; // Transparent data
+    }
     hci_send_cmd(&hci_setup_synchronous_connection, hfp_connection->acl_handle, 8000, 8000, hfp_link_settings[setting].max_latency,
-        hci_get_sco_voice_setting(), hfp_link_settings[setting].retransmission_effort, hfp_link_settings[setting].packet_types); // all types 0x003f, only 2-ev3 0x380
+        sco_voice_setting, hfp_link_settings[setting].retransmission_effort, hfp_link_settings[setting].packet_types); // all types 0x003f, only 2-ev3 0x380
 }
 
 void hfp_set_packet_handler_for_rfcomm_connections(btstack_packet_handler_t handler){

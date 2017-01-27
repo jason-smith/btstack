@@ -65,6 +65,8 @@ int btstack_main(int argc, const char * argv[]);
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 
 static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
+    UNUSED(channel);
+    UNUSED(size);
     if (packet_type != HCI_EVENT_PACKET) return;
     if (hci_event_packet_get_type(packet) != BTSTACK_EVENT_STATE) return;
     if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
@@ -72,7 +74,8 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
 }
 
 static void sigint_handler(int param){
-
+    UNUSED(param);
+    
 #ifndef _WIN32
     // reset anyway
     btstack_stdin_reset();
@@ -92,19 +95,55 @@ void hal_led_toggle(void){
 }
 
 
+#define USB_MAX_PATH_LEN 7
 int main(int argc, const char * argv[]){
+
+    uint8_t usb_path[USB_MAX_PATH_LEN];
+    int usb_path_len = 0;
+    if (argc >= 3 && strcmp(argv[1], "-u") == 0){
+        // parse command line options for "-u 11:22:33"
+        const char * port_str = argv[2];
+        printf("Specified USB Path: ");
+        while (1){
+            char * delimiter;
+            int port = strtol(port_str, &delimiter, 16);
+            usb_path[usb_path_len] = port;
+            usb_path_len++;
+            printf("%02x ", port);
+            if (!delimiter) break;
+            if (*delimiter != ':' && *delimiter != '-') break;
+            port_str = delimiter+1;
+        }
+        printf("\n");
+    }
 
 	/// GET STARTED with BTstack ///
 	btstack_memory_init();
     btstack_run_loop_init(btstack_run_loop_posix_get_instance());
 	    
+    if (usb_path_len){
+        hci_transport_usb_set_path(usb_path_len, usb_path);
+    }
+
     // use logger: format HCI_DUMP_PACKETLOGGER, HCI_DUMP_BLUEZ or HCI_DUMP_STDOUT
-    hci_dump_open("/tmp/hci_dump.pklg", HCI_DUMP_PACKETLOGGER);
+
+    char pklg_path[100];
+    strcpy(pklg_path, "/tmp/hci_dump");
+    if (usb_path_len){
+        strcat(pklg_path, "_");
+        strcat(pklg_path, argv[2]);
+    }
+    strcat(pklg_path, ".pklg");
+    printf("Packet Log: %s\n", pklg_path);
+    hci_dump_open(pklg_path, HCI_DUMP_PACKETLOGGER);
 
     // init HCI
 	hci_init(hci_transport_usb_instance(), NULL);
+
+#ifdef ENABLE_CLASSIC
     hci_set_link_key_db(btstack_link_key_db_fs_instance());
-    
+#endif    
+
     // inform about BTstack state
     hci_event_callback_registration.callback = &packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);

@@ -416,9 +416,32 @@ static const hci_transport_config_uart_t config = {
 
 static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
     if (packet_type != HCI_EVENT_PACKET) return;
-    if (hci_event_packet_get_type(packet) != BTSTACK_EVENT_STATE) return;
-    if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
-    printf("BTstack up and running.\n");
+    switch(hci_event_packet_get_type(packet)){
+        case BTSTACK_EVENT_STATE:
+            if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
+            printf("BTstack up and running.\n");
+            break;
+        case HCI_EVENT_COMMAND_COMPLETE:
+            if (HCI_EVENT_IS_COMMAND_COMPLETE(packet, hci_read_local_version_information)){
+                uint16_t manufacturer   = little_endian_read_16(packet, 10);
+                uint16_t lmp_subversion = little_endian_read_16(packet, 12);
+                // assert manufacturer is TI
+                if (manufacturer != COMPANY_ID_TEXAS_INSTRUMENTS_INC){
+                    printf("ERROR: Expected Bluetooth Chipset from TI but got manufacturer 0x%04x\n", manufacturer);
+                    break;
+                }
+                // assert correct init script is used based on expected lmp_subversion
+                if (lmp_subversion != btstack_chipset_cc256x_lmp_subversion()){
+                    printf("Error: LMP Subversion does not match initscript! ");
+                    printf("Your initscripts is for %s chipset\n", btstack_chipset_cc256x_lmp_subversion() < lmp_subversion ? "an older" : "a newer");
+                    printf("Please update Makefile to include the appropriate bluetooth_init_cc256???.c file\n");
+                    break;
+                }
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 int main(void)
@@ -434,16 +457,13 @@ int main(void)
     btstack_run_loop_init(btstack_run_loop_embedded_get_instance());
     
     // init HCI
-    hci_init(hci_transport_h4_instance(), (void*) &config);
+    hci_init(hci_transport_h4_instance(btstack_uart_block_embedded_instance()), (void*) &config);
     hci_set_link_key_db(btstack_link_key_db_memory_instance());
     hci_set_chipset(btstack_chipset_cc256x_instance());
 
     // inform about BTstack state
     hci_event_callback_registration.callback = &packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
-
-    // enable eHCILL
-    btstack_chipset_cc256x_enable_ehcill(1);
 
 	// hand over to btstack embedded code 
     btstack_main();

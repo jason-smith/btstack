@@ -62,7 +62,6 @@
 #include <time.h>
 #include <sys/time.h>     // for timestamps
 #include <sys/stat.h>     // for mode flags
-#include <stdarg.h>       // for va_list
 #endif
 
 // BLUEZ hcidump - struct not used directly, but left here as documentation
@@ -108,14 +107,20 @@ void hci_dump_open(const char *filename, hci_dump_format_t format){
         dump_file = fileno(stdout);
     } else {
 
-# ifdef _WIN32
-        dump_file = open(filename, O_WRONLY | O_CREAT | O_TRUNC);
-# else
-        dump_file = open(filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-# endif
+        int oflags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef _WIN32
+        oflags |= O_BINARY;
+#endif
 
+        dump_file = open(filename, oflags, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH );
+        if (dump_file < 0){
+            printf("hci_dump_open: failed to open file %s\n", filename);
+        }
     }
 #else
+    UNUSED(filename);
+    UNUSED(format);
+    
     dump_file = 1;
 #endif
 }
@@ -141,6 +146,13 @@ static void printf_packet(uint8_t packet_type, uint8_t in, uint8_t * packet, uin
                 printf("ACL => ");
             }
             break;
+        case HCI_SCO_DATA_PACKET:
+            if (in) {
+                printf("SCO <= ");
+            } else {
+                printf("SCO => ");
+            }
+            break;
         case LOG_MESSAGE_PACKET:
             printf("LOG -- %s\n", (char*) packet);
             return;
@@ -149,6 +161,20 @@ static void printf_packet(uint8_t packet_type, uint8_t in, uint8_t * packet, uin
     }
     printf_hexdump(packet, len);  
 }
+
+#ifndef HAVE_POSIX_FILE_IO
+static void printf_timestamp(void){
+    uint32_t time_ms = btstack_run_loop_get_time_ms();
+    int      seconds = time_ms / 1000;
+    int      minutes = seconds / 60;
+    unsigned int hours   = minutes / 60;
+
+    uint16_t p_ms      = time_ms - (seconds * 1000);
+    uint16_t p_seconds = seconds - (minutes * 60);
+    uint16_t p_minutes = minutes - (hours   * 60);     
+    printf("[%02u:%02u:%02u.%03u] ", hours, p_minutes, p_seconds, p_ms);
+}
+#endif
 
 void hci_dump_packet(uint8_t packet_type, uint8_t in, uint8_t *packet, uint16_t len) {
 
@@ -176,12 +202,13 @@ void hci_dump_packet(uint8_t packet_type, uint8_t in, uint8_t *packet, uint16_t 
         case HCI_DUMP_STDOUT: {
             /* Obtain the time of day, and convert it to a tm struct. */
             ptm = localtime (&curr_time_secs);
+            /* assert localtime was successful */
+            if (!ptm) break;
             /* Format the date and time, down to a single second. */
             strftime (time_string, sizeof (time_string), "[%Y-%m-%d %H:%M:%S", ptm);
             /* Compute milliseconds from microseconds. */
             uint16_t milliseconds = curr_time.tv_usec / 1000;
-            /* Print the formatted time, in seconds, followed by a decimal point
-             and the milliseconds. */
+            /* Print the formatted time, in seconds, followed by a decimal point and the milliseconds. */
             printf ("%s.%03u] ", time_string, milliseconds);
             printf_packet(packet_type, in, packet, len);
             break;
@@ -191,8 +218,8 @@ void hci_dump_packet(uint8_t packet_type, uint8_t in, uint8_t *packet, uint16_t 
             little_endian_store_16( header_bluez, 0, 1 + len);
             header_bluez[2] = in;
             header_bluez[3] = 0;
-            little_endian_store_32( header_bluez, 4, curr_time.tv_sec);
-            little_endian_store_32( header_bluez, 8, curr_time.tv_usec);
+            little_endian_store_32( header_bluez, 4, (uint32_t) curr_time.tv_sec);
+            little_endian_store_32( header_bluez, 8,            curr_time.tv_usec);
             header_bluez[12] = packet_type;
             write (dump_file, header_bluez, HCIDUMP_HDR_SIZE);
             write (dump_file, packet, len );
@@ -200,7 +227,7 @@ void hci_dump_packet(uint8_t packet_type, uint8_t in, uint8_t *packet, uint16_t 
             
         case HCI_DUMP_PACKETLOGGER:
             big_endian_store_32( header_packetlogger, 0, PKTLOG_HDR_SIZE - 4 + len);
-            big_endian_store_32( header_packetlogger, 4, curr_time.tv_sec);
+            big_endian_store_32( header_packetlogger, 4,  (uint32_t) curr_time.tv_sec);
             big_endian_store_32( header_packetlogger, 8, curr_time.tv_usec);
             switch (packet_type){
                 case HCI_COMMAND_DATA_PACKET:
@@ -238,10 +265,7 @@ void hci_dump_packet(uint8_t packet_type, uint8_t in, uint8_t *packet, uint16_t 
     }
 #else
 
-// #ifdef HAVE_EMBEDDED_TICK
-//     uint32_t time_ms = btstack_run_loop_embedded_get_time_ms();
-//     printf("[%06u] ", time_ms);
-// #endif
+    printf_timestamp();
     printf_packet(packet_type, in, packet, len);
 
 #endif
@@ -253,18 +277,24 @@ static int hci_dump_log_level_active(int log_level){
     return log_level_enabled[log_level];
 }
 
+void hci_dump_log_va_arg(int log_level, const char * format, va_list argptr){
+    if (hci_dump_log_level_active(log_level)) {
+#ifdef HAVE_POSIX_FILE_IO
+        int len = vsnprintf(log_message_buffer, sizeof(log_message_buffer), format, argptr);
+        hci_dump_packet(LOG_MESSAGE_PACKET, 0, (uint8_t*) log_message_buffer, len);
+#else
+        printf_timestamp();
+        printf("LOG -- ");
+        vprintf(format, argptr);
+        printf("\n");
+#endif
+    }
+}
+
 void hci_dump_log(int log_level, const char * format, ...){
-    if (!hci_dump_log_level_active(log_level)) return;
     va_list argptr;
     va_start(argptr, format);
-#ifdef HAVE_POSIX_FILE_IO
-    int len = vsnprintf(log_message_buffer, sizeof(log_message_buffer), format, argptr);
-    hci_dump_packet(LOG_MESSAGE_PACKET, 0, (uint8_t*) log_message_buffer, len);
-#else
-    printf("LOG -- ");
-    vprintf(format, argptr);
-    printf("\n");
-#endif
+    hci_dump_log_va_arg(log_level, format, argptr);
     va_end(argptr);
 }
 

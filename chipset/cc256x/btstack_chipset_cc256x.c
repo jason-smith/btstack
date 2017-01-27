@@ -84,14 +84,64 @@ extern const uint32_t cc256x_init_script_size;
 // init script
 static uint32_t init_script_offset  = 0;
 static int16_t  init_power_in_dB    = 13; // 13 dBm
-static int      init_ehcill_enabled = 0;
 
 // support for SCO over HCI
 #ifdef ENABLE_SCO_OVER_HCI
 static int      init_send_route_sco_over_hci = 0;
-// route SCO over HCI (connection type=1, tx buffer size = 0x00 (don't change), tx buffer max latency=0x0000(don't chnage)), accept packets - 0)
 static const uint8_t hci_route_sco_over_hci[] = {
-    0x10, 0xfe, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00
+#if 1
+    // Follow recommendation from https://e2e.ti.com/support/wireless_connectivity/bluetooth_cc256x/f/660/t/397004
+    // route SCO over HCI (connection type=1, tx buffer size = 120, tx buffer max latency= 720, accept packets with CRC Error
+    0x10, 0xfe, 0x05, 0x01, 0x78, 0xd0, 0x02, 0x01,
+#else
+    // Configure SCO via I2S interface - 256 kbps
+    // Send_HCI_VS_Write_CODEC_Config 0xFD06,
+    0x06, 0xfd, 
+    // len
+    34,
+    //3072, - clock rate 3072000 hz
+    0x00, 0x01, 
+    // 0x00 - clock direction: output = master
+    0x00,
+    // 8000, framesync frequency in hz
+    0x40, 0x1f, 0x00, 0x00,
+    // 0x0001, framesync duty cycle
+    0x01, 0x00,
+    // 1, framesync edge
+    1,
+    // 0x00, framesync polarity
+    0x00,
+    // 0x00, RESERVED
+    0x00,
+    // 16, channel 1 out size
+    8, 0,
+    // 0x0001, channel 1 out offset
+    0x01, 0x00,
+    // 1, channel 1 out edge
+    1,
+    // 16,  channel 1 in size
+    8, 0,
+    // 0x0001, channel 1 in offset
+    0x01, 0x00,
+    // 0, channel 1 in edge
+    0,
+    // 0x00,  RESERVED
+    0x00,
+    // 16, channel 2 out size
+    8, 0,
+    // 17, channel 2 out offset
+    9, 0,
+    // 0x01, channel 2 out edge
+    0x01,
+    // 16,  channel 2 in size
+    8, 0,
+    // 17,  channel 2 in offset
+    9, 0,
+    // 0x00, channel 2 in edge
+    0x00,
+    // 0x0001, RESERVED
+    0x00
+#endif
 };
 #endif
 
@@ -112,10 +162,12 @@ static void chipset_set_baudrate_command(uint32_t baudrate, uint8_t *hci_cmd_buf
     hci_cmd_buffer[6] = 0;
 }
 
-#if 0
 static void chipset_set_bd_addr_command(bd_addr_t addr, uint8_t *hci_cmd_buffer){
+    hci_cmd_buffer[0] = 0x06;
+    hci_cmd_buffer[1] = 0xFC;
+    hci_cmd_buffer[2] = 0x06;
+    reverse_bd_addr(addr, &hci_cmd_buffer[3]);
 }
-#endif
 
 // Output Power control from: http://e2e.ti.com/support/low_power_rf/f/660/p/134853/484767.aspx
 #define NUM_POWER_LEVELS 16
@@ -193,11 +245,11 @@ static void update_set_class2_single_power(uint8_t * hci_cmd_buffer){
 
 // eHCILL activate from http://e2e.ti.com/support/low_power_rf/f/660/p/134855/484776.aspx
 static void update_sleep_mode_configurations(uint8_t * hci_cmd_buffer){
-    if (init_ehcill_enabled) {
-        hci_cmd_buffer[4] = 1;
-    } else {
-        hci_cmd_buffer[4] = 0;
-    }
+#ifdef ENABLE_EHCILL  
+    hci_cmd_buffer[4] = 1;
+#else
+    hci_cmd_buffer[4] = 0;
+#endif
 }
 
 static void update_init_script_command(uint8_t *hci_cmd_buffer){
@@ -275,14 +327,6 @@ static btstack_chipset_result_t chipset_next_command(uint8_t * hci_cmd_buffer){
 
 
 // MARK: public API
-void btstack_chipset_cc256x_enable_ehcill(int on){
-    init_ehcill_enabled = on;
-}
-
-int btstack_chipset_cc256x_ehcill_enabled(void){
-    return init_ehcill_enabled;
-}
-
 void btstack_chipset_cc256x_set_power(int16_t power_in_dB){
     init_power_in_dB = power_in_dB;
 }
@@ -292,7 +336,7 @@ static const btstack_chipset_t btstack_chipset_cc256x = {
     chipset_init,
     chipset_next_command,
     chipset_set_baudrate_command,
-    NULL,   // set bd addr command not available or impemented
+    chipset_set_bd_addr_command,
 };
 
 const btstack_chipset_t * btstack_chipset_cc256x_instance(void){

@@ -56,6 +56,10 @@
 #include "gap.h"
 #include "hci_transport.h"
 
+#ifdef ENABLE_BLE
+#include "ble/att_db.h"
+#endif
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -199,6 +203,8 @@ typedef enum {
     LE_CONNECTING_WHITELIST,
 } le_connecting_state_t;
 
+#ifdef ENABLE_BLE
+
 //
 // SM internal types and globals
 //
@@ -271,7 +277,7 @@ typedef enum {
     // state = 35
     SM_RESPONDER_IDLE,
     SM_RESPONDER_SEND_SECURITY_REQUEST,
-    SM_RESPONDER_PH0_RECEIVED_LTK,
+    SM_RESPONDER_PH0_RECEIVED_LTK_REQUEST,
     SM_RESPONDER_PH0_SEND_LTK_REQUESTED_NEGATIVE_REPLY,
     SM_RESPONDER_PH1_W4_PAIRING_REQUEST,
     SM_RESPONDER_PH1_PAIRING_REQUEST_RECEIVED,
@@ -287,7 +293,7 @@ typedef enum {
     SM_RESPONDER_PH4_Y_W4_ENC,
     SM_RESPONDER_PH4_LTK_GET_ENC,
     SM_RESPONDER_PH4_LTK_W4_ENC,
-    SM_RESPONDER_PH4_SEND_LTK,
+    SM_RESPONDER_PH4_SEND_LTK_REPLY,
 
     // INITITIATOR ROLE
     // state = 51
@@ -302,6 +308,42 @@ typedef enum {
     SM_INITIATOR_PH2_W4_PAIRING_RANDOM,
     SM_INITIATOR_PH3_SEND_START_ENCRYPTION,
 
+    // LE Secure Connections
+    SM_SC_RECEIVED_LTK_REQUEST,
+    SM_SC_SEND_PUBLIC_KEY_COMMAND,
+    SM_SC_W4_PUBLIC_KEY_COMMAND,
+    SM_SC_W2_GET_RANDOM_A,
+    SM_SC_W4_GET_RANDOM_A,
+    SM_SC_W2_GET_RANDOM_B,
+    SM_SC_W4_GET_RANDOM_B,
+    SM_SC_W2_CMAC_FOR_CONFIRMATION,
+    SM_SC_W4_CMAC_FOR_CONFIRMATION,
+    SM_SC_SEND_CONFIRMATION,
+    SM_SC_W2_CMAC_FOR_CHECK_CONFIRMATION,    
+    SM_SC_W4_CMAC_FOR_CHECK_CONFIRMATION,    
+    SM_SC_W4_CONFIRMATION,
+    SM_SC_SEND_PAIRING_RANDOM,
+    SM_SC_W4_PAIRING_RANDOM,
+    SM_SC_W2_CALCULATE_G2,
+    SM_SC_W4_CALCULATE_G2,
+    SM_SC_W2_CALCULATE_F5_SALT,
+    SM_SC_W4_CALCULATE_F5_SALT,
+    SM_SC_W2_CALCULATE_F5_MACKEY,
+    SM_SC_W4_CALCULATE_F5_MACKEY,
+    SM_SC_W2_CALCULATE_F5_LTK,
+    SM_SC_W4_CALCULATE_F5_LTK,
+    SM_SC_W2_CALCULATE_F6_FOR_DHKEY_CHECK,
+    SM_SC_W4_CALCULATE_F6_FOR_DHKEY_CHECK,
+    SM_SC_W2_CALCULATE_F6_TO_VERIFY_DHKEY_CHECK,
+    SM_SC_W4_CALCULATE_F6_TO_VERIFY_DHKEY_CHECK,
+    SM_SC_W4_USER_RESPONSE,
+    SM_SC_SEND_DHKEY_CHECK_COMMAND,
+    SM_SC_W4_DHKEY_CHECK_COMMAND,
+    SM_SC_W4_LTK_REQUEST_SC,
+    SM_SC_W2_CALCULATE_H6_ILK,
+    SM_SC_W4_CALCULATE_H6_ILK,
+    SM_SC_W2_CALCULATE_H6_BR_EDR_LINK_KEY,
+    SM_SC_W4_CALCULATE_H6_BR_EDR_LINK_KEY,
 } security_manager_state_t;
 
 typedef enum {
@@ -342,6 +384,44 @@ typedef struct sm_connection {
     int                      sm_le_db_index;
 } sm_connection_t;
 
+//
+// ATT Server
+//
+
+// max ATT request matches L2CAP PDU -- allow to use smaller buffer
+#ifndef ATT_REQUEST_BUFFER_SIZE
+#define ATT_REQUEST_BUFFER_SIZE HCI_ACL_PAYLOAD_SIZE
+#endif
+
+typedef enum {
+    ATT_SERVER_IDLE,
+    ATT_SERVER_REQUEST_RECEIVED,
+    ATT_SERVER_W4_SIGNED_WRITE_VALIDATION,
+    ATT_SERVER_REQUEST_RECEIVED_AND_VALIDATED,
+} att_server_state_t;
+
+typedef struct {
+    att_server_state_t      state;
+
+    uint8_t                 peer_addr_type;
+    bd_addr_t               peer_address;
+
+    int                     ir_le_device_db_index;
+    int                     ir_lookup_active;
+
+    int                     value_indication_handle;    
+    btstack_timer_source_t  value_indication_timer;
+
+    att_connection_t        connection;
+
+    uint16_t                request_size;
+    uint8_t                 request_buffer[ATT_REQUEST_BUFFER_SIZE];
+
+} att_server_t;
+
+#endif
+
+//
 typedef struct {
     // linked list - assert: first field
     btstack_linked_item_t    item;
@@ -401,6 +481,9 @@ typedef struct {
 #ifdef ENABLE_BLE
     // LE Security Manager
     sm_connection_t sm_connection;
+
+    // ATT Server
+    att_server_t    att_server;
 #endif
 
 } hci_connection_t;
@@ -414,6 +497,8 @@ typedef enum hci_init_state{
     HCI_INIT_W4_SEND_RESET,
     HCI_INIT_SEND_READ_LOCAL_VERSION_INFORMATION,
     HCI_INIT_W4_SEND_READ_LOCAL_VERSION_INFORMATION,
+    HCI_INIT_SEND_READ_LOCAL_NAME,
+    HCI_INIT_W4_SEND_READ_LOCAL_NAME,
 
     HCI_INIT_SEND_BAUD_CHANGE,
     HCI_INIT_W4_SEND_BAUD_CHANGE,
@@ -421,6 +506,7 @@ typedef enum hci_init_state{
     HCI_INIT_W4_CUSTOM_INIT,
     HCI_INIT_SEND_RESET_CSR_WARM_BOOT,
     HCI_INIT_W4_CUSTOM_INIT_CSR_WARM_BOOT,
+    HCI_INIT_W4_CUSTOM_INIT_CSR_WARM_BOOT_LINK_RESET,
 
     HCI_INIT_READ_LOCAL_SUPPORTED_COMMANDS,
     HCI_INIT_W4_READ_LOCAL_SUPPORTED_COMMANDS,
@@ -451,11 +537,18 @@ typedef enum hci_init_state{
     HCI_INIT_W4_WRITE_CLASS_OF_DEVICE,
     HCI_INIT_WRITE_LOCAL_NAME,
     HCI_INIT_W4_WRITE_LOCAL_NAME,
+    HCI_INIT_WRITE_EIR_DATA,
+    HCI_INIT_W4_WRITE_EIR_DATA,
+    HCI_INIT_WRITE_INQUIRY_MODE,
+    HCI_INIT_W4_WRITE_INQUIRY_MODE,
     HCI_INIT_WRITE_SCAN_ENABLE,
     HCI_INIT_W4_WRITE_SCAN_ENABLE,
     
+    // SCO over HCI
     HCI_INIT_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE,
     HCI_INIT_W4_WRITE_SYNCHRONOUS_FLOW_CONTROL_ENABLE,
+    HCI_INIT_WRITE_DEFAULT_ERRONEOUS_DATA_REPORTING,
+    HCI_INIT_W4_WRITE_DEFAULT_ERRONEOUS_DATA_REPORTING,
 
     HCI_INIT_LE_READ_BUFFER_SIZE,
     HCI_INIT_W4_LE_READ_BUFFER_SIZE,
@@ -527,24 +620,23 @@ typedef struct {
     /* callbacks for events */
     btstack_linked_list_t event_handlers;
 
-    // local version information callback
-    void (*local_version_information_callback)(uint8_t * local_version_information);
-
     // hardware error callback
-    void (*hardware_error_callback)(void);
+    void (*hardware_error_callback)(uint8_t error);
 
     // basic configuration
     const char *       local_name;
+    const uint8_t *    eir_data;
     uint32_t           class_of_device;
     bd_addr_t          local_bd_addr;
     uint8_t            ssp_enable;
     uint8_t            ssp_io_capability;
     uint8_t            ssp_authentication_requirement;
     uint8_t            ssp_auto_accept;
-    
+    inquiry_mode_t     inquiry_mode;
+
     // single buffer for HCI packet assembly + additional prebuffer for H4 drivers
-    uint8_t   hci_packet_buffer_prefix[HCI_OUTGOING_PRE_BUFFER_SIZE];
-    uint8_t   hci_packet_buffer[HCI_PACKET_BUFFER_SIZE]; // opcode (16), len(8)
+    uint8_t   * hci_packet_buffer;
+    uint8_t   hci_packet_buffer_data[HCI_OUTGOING_PRE_BUFFER_SIZE + HCI_PACKET_BUFFER_SIZE];
     uint8_t   hci_packet_buffer_reserved;
     uint16_t  acl_fragmentation_pos;
     uint16_t  acl_fragmentation_total_size;
@@ -566,6 +658,8 @@ typedef struct {
     /* local supported commands summary - complete info is 64 bytes */
     /* 0 - read buffer size */
     /* 1 - write le host supported */
+    /* 2 - Write Synchronous Flow Control Enable (Octet 10/bit 4) */
+    /* 3 - Write Default Erroneous Data Reporting (Octect 18/bit 3) */
     uint8_t local_supported_commands[1];
 
     /* bluetooth device information from hci read local version information */
@@ -594,7 +688,7 @@ typedef struct {
     /* buffer for scan enable cmd - 0xff no change */
     uint8_t   new_scan_enable_value;
     
-    uint16_t   sco_voice_setting;
+    uint16_t  sco_voice_setting;
 
     uint8_t   loopback_mode;
 
@@ -605,6 +699,7 @@ typedef struct {
     uint8_t   adv_addr_type;
     bd_addr_t adv_address;
 
+#ifdef ENABLE_LE_CENTRAL
     le_scanning_state_t   le_scanning_state;
     le_connecting_state_t le_connecting_state;
 
@@ -613,8 +708,14 @@ typedef struct {
     uint16_t le_scan_interval;  
     uint16_t le_scan_window;
 
+    // LE Whitelist Management
+    uint16_t      le_whitelist_capacity;
+    btstack_linked_list_t le_whitelist;
+#endif
+
     le_connection_parameter_range_t le_connection_parameter_range;
 
+#ifdef ENABLE_LE_PERIPHERAL
     uint8_t  * le_advertisements_data;
     uint8_t    le_advertisements_data_len;
 
@@ -624,6 +725,7 @@ typedef struct {
     uint8_t  le_advertisements_active;
     uint8_t  le_advertisements_enabled;
     uint8_t  le_advertisements_todo;
+    uint8_t  le_advertisements_random_address_set;
 
     uint16_t le_advertisements_interval_min;
     uint16_t le_advertisements_interval_max;
@@ -633,10 +735,7 @@ typedef struct {
     uint8_t  le_advertisements_channel_map;
     uint8_t  le_advertisements_filter_policy;
     bd_addr_t le_advertisements_direct_address;
-
-    // LE Whitelist Management
-    uint16_t      le_whitelist_capacity;
-    btstack_linked_list_t le_whitelist;
+#endif
 
     // custom BD ADDR
     bd_addr_t custom_bd_addr; 
@@ -674,13 +773,7 @@ void hci_set_link_key_db(btstack_link_key_db_t const * link_key_db);
 /**
  * @brief Set callback for Bluetooth Hardware Error
  */
-void hci_set_hardware_error_callback(void (*fn)(void));
-
-/**
- * @brief Set callback for local information from Bluetooth controller right after HCI Reset
- * @note Can be used to select chipset driver dynamically during startup
- */
-void hci_set_local_version_information_callback(void (*fn)(uint8_t * local_version_information));
+void hci_set_hardware_error_callback(void (*fn)(uint8_t error));
 
 /**
  * @brief Set Public BD ADDR - passed on to Bluetooth chipset during init if supported in bt_control_h
@@ -697,6 +790,12 @@ void hci_set_sco_voice_setting(uint16_t voice_setting);
  * @return current voice setting
  */
 uint16_t hci_get_sco_voice_setting(void);
+
+/**
+ * @brief Set inquiry mode: standard, with RSSI, with RSSI + Extended Inquiry Results. Has to be called before power on.
+ * @param inquriy_mode see bluetooth_defines.h
+ */
+void hci_set_inquiry_mode(inquiry_mode_t mode);
 
 /**
  * @brief Requests the change of BTstack power mode.
@@ -796,6 +895,10 @@ void hci_release_packet_buffer(void);
 /* API_END */
 
 
+/**
+ * va_list version of hci_send_cmd
+ */
+int hci_send_cmd_va_arg(const hci_cmd_t *cmd, va_list argtr);
 
 /**
  * Get connection iterator. Only used by l2cap.c and sm.c
@@ -864,6 +967,11 @@ uint16_t hci_usable_acl_packet_types(void);
 int hci_non_flushable_packet_boundary_flag_supported(void);
 
 /**
+ * Check if extended SCO Link is supported
+ */
+int hci_extended_sco_link_supported(void);
+
+/**
  * Check if SSP is supported on both sides. Called by L2CAP
  */
 int gap_ssp_supported_on_both_sides(hci_con_handle_t handle);
@@ -915,6 +1023,13 @@ void hci_le_advertisements_set_params(uint16_t adv_int_min, uint16_t adv_int_max
     uint8_t own_address_type, uint8_t direct_address_typ, bd_addr_t direct_address,
     uint8_t channel_map, uint8_t filter_policy);
 
+void hci_le_advertisements_set_own_address_type(uint8_t own_address_type);
+
+/**
+ * @brief Get Manufactured
+ * @return manufacturer id
+ */
+uint16_t hci_get_manufacturer(void);
 
 // Only for PTS testing
 

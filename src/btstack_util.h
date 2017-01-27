@@ -65,12 +65,30 @@ extern "C" {
 
 // will be moved to daemon/btstack_device_name_db.h
 
+
 /**
  * @brief The device name type
  */
 #define DEVICE_NAME_LEN 248
 typedef uint8_t device_name_t[DEVICE_NAME_LEN+1]; 
 
+/* API_START */
+
+/**
+ * @brief Minimum function for uint32_t
+ * @param a
+ * @param b
+ * @return value
+ */
+uint32_t btstack_min(uint32_t a, uint32_t b);
+
+/**
+ * @brief Maximum function for uint32_t
+ * @param a
+ * @param b
+ * @return value
+ */
+uint32_t btstack_max(uint32_t a, uint32_t b);
 
 	
 /** 
@@ -128,6 +146,7 @@ void reverse_48 (const uint8_t *src, uint8_t * dest);
 void reverse_56 (const uint8_t *src, uint8_t * dest);
 void reverse_64 (const uint8_t *src, uint8_t * dest);
 void reverse_128(const uint8_t *src, uint8_t * dest);
+void reverse_256(const uint8_t *src, uint8_t * dest);
 
 void reverse_bd_addr(const bd_addr_t src, bd_addr_t dest);
 
@@ -198,6 +217,15 @@ void uuid_add_bluetooth_prefix(uint8_t * uuid128, uint32_t short_uuid);
  * @return 1 if it can be expressed as UUID32
  */
 int  uuid_has_bluetooth_prefix(uint8_t * uuid128);
+
+/**
+ * @brief Parse unsigned number 
+ * @param str to parse
+ * @return value
+ */
+uint32_t btstack_atoi(const char *str);
+
+/* API_END */
 
 #if defined __cplusplus
 }

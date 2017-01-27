@@ -44,17 +44,17 @@
  */
 
 #include "btstack_config.h"
+#include "btstack_debug.h"
 #include "btstack_util.h"
+
 #include <stdio.h>
 #include <string.h>
-#include "btstack_debug.h"
-
 
 /**
  * @brief Compare two Bluetooth addresses
  * @param a
  * @param b
- * @return true if equal
+ * @return 0 if equal
  */
 int bd_addr_cmp(bd_addr_t a, bd_addr_t b){
     return memcmp(a,b, BD_ADDR_LEN);
@@ -132,9 +132,20 @@ void reverse_64(const uint8_t * src, uint8_t * dst){
 void reverse_128(const uint8_t * src, uint8_t * dst){
     reverse_bytes(src, dst, 16);
 }
+void reverse_256(const uint8_t * src, uint8_t * dst){
+    reverse_bytes(src, dst, 32);
+}
 
 void reverse_bd_addr(const bd_addr_t src, bd_addr_t dest){
     reverse_bytes(src, dest, 6);
+}
+
+uint32_t btstack_min(uint32_t a, uint32_t b){
+    return a < b ? a : b;
+}
+
+uint32_t btstack_max(uint32_t a, uint32_t b){
+    return a > b ? a : b;
 }
 
 char char_for_nibble(int nibble){
@@ -144,10 +155,18 @@ char char_for_nibble(int nibble){
     return '?';
 }
 
+static inline char char_for_high_nibble(int value){
+    return char_for_nibble((value >> 4) & 0x0f);
+}
+
+static inline char char_for_low_nibble(int value){
+    return char_for_nibble(value & 0x0f);
+}
+
 int nibble_for_char(char c){
     if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a';
-    if (c >= 'A' && c <= 'F') return c - 'F';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
 
@@ -160,27 +179,32 @@ void printf_hexdump(const void *data, int size){
     printf("\n");
 }
 
-//  void log_info_hexdump(..){
-//  
-//  }
-
 void log_info_hexdump(const void *data, int size){
 #ifdef ENABLE_LOG_INFO
-    char buffer[6*16+1];
-    int i, j;
 
-    uint8_t low = 0x0F;
-    uint8_t high = 0xF0;
+#define ITEMS_PER_LINE 16
+// template '0x12, '
+#define BYTES_PER_BYTE  6
+
+    char buffer[BYTES_PER_BYTE*ITEMS_PER_LINE+1];
+    int i, j;
     j = 0;
     for (i=0; i<size;i++){
+
+        // help static analyzer proof that j stays within bounds
+        if (j > BYTES_PER_BYTE * (ITEMS_PER_LINE-1)){
+            j = 0;
+        }
+
         uint8_t byte = ((uint8_t *)data)[i];
         buffer[j++] = '0';
         buffer[j++] = 'x';
-        buffer[j++] = char_for_nibble((byte & high) >> 4);
-        buffer[j++] = char_for_nibble(byte & low);
+        buffer[j++] = char_for_high_nibble(byte);
+        buffer[j++] = char_for_low_nibble(byte);
         buffer[j++] = ',';
         buffer[j++] = ' ';     
-        if (j >= 6*16 ){
+
+        if (j >= BYTES_PER_BYTE * ITEMS_PER_LINE ){
             buffer[j] = 0;
             log_info("%s", buffer);
             j = 0;
@@ -190,12 +214,28 @@ void log_info_hexdump(const void *data, int size){
         buffer[j] = 0;
         log_info("%s", buffer);
     }
+#else
+    UNUSED(data);
+    UNUSED(size);
 #endif
 }
 
 void log_info_key(const char * name, sm_key_t key){
-    // log_info("%-6s ", name);
-    // hexdump(key, 16);
+#ifdef ENABLE_LOG_INFO
+    char buffer[16*2+1];
+    int i;
+    int j = 0;
+    for (i=0; i<16;i++){
+        uint8_t byte = key[i];
+        buffer[j++] = char_for_high_nibble(byte);
+        buffer[j++] = char_for_low_nibble(byte);
+    }
+    buffer[j] = 0;
+    log_info("%-6s %s", name, buffer);
+#else
+    UNUSED(name);
+    UNUSED(key);
+#endif
 }
 
 // UUIDs are stored in big endian, similar to bd_addr_t
@@ -215,9 +255,18 @@ int uuid_has_bluetooth_prefix(uint8_t * uuid128){
 
 static char uuid128_to_str_buffer[32+4+1];
 char * uuid128_to_str(uint8_t * uuid){
-    sprintf(uuid128_to_str_buffer, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-           uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
-           uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
+    int i;
+    int j = 0;
+    // after 4, 6, 8, and 10 bytes = XYXYXYXY-XYXY-XYXY-XYXY-XYXYXYXYXYXY, there's a dash
+    const int dash_locations = (1<<3) | (1<<5) | (1<<7) | (1<<9);
+    for (i=0;i<16;i++){
+        uint8_t byte = uuid[i];
+        uuid128_to_str_buffer[j++] = char_for_high_nibble(byte);
+        uuid128_to_str_buffer[j++] = char_for_low_nibble(byte);
+        if (dash_locations & (1<<i)){
+            uuid128_to_str_buffer[j++] = '-';
+        }
+    }
     return uuid128_to_str_buffer;
 }
 
@@ -229,8 +278,9 @@ char * bd_addr_to_str(bd_addr_t addr){
     char * p = bd_addr_to_str_buffer;
     int i;
     for (i = 0; i < 6 ; i++) {
-        *p++ = char_for_nibble((addr[i] >> 4) & 0x0F);
-        *p++ = char_for_nibble((addr[i] >> 0) & 0x0F);
+        uint8_t byte = addr[i];
+        *p++ = char_for_high_nibble(byte);
+        *p++ = char_for_low_nibble(byte);
         *p++ = ':';
     }
     *--p = 0;
@@ -253,7 +303,7 @@ int sscanf_bd_addr(const char * addr_string, bd_addr_t addr){
         int single_byte = scan_hex_byte(addr_string);
         if (single_byte < 0) break;
         addr_string += 2;
-        addr[i] = single_byte;
+        buffer[i] = single_byte;
         // don't check seperator after last byte
         if (i == BD_ADDR_LEN - 1) {
             result = 1;
@@ -267,4 +317,15 @@ int sscanf_bd_addr(const char * addr_string, bd_addr_t addr){
         bd_addr_copy(addr, buffer);
     }
 	return result;
+}
+
+uint32_t btstack_atoi(const char *str){
+    uint32_t val = 0;
+    while (1){
+        char chr = *str;
+        if (!chr || chr < '0' || chr > '9')
+            return val;
+        val = (val * 10) + (chr - '0');
+        str++;
+    }
 }

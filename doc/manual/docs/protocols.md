@@ -303,6 +303,26 @@ as soon as possible. It might happen that the event is received via
 packet handler before the *l2cap_request_can_send_now_event* function returns.
 The L2CAP_EVENT_CAN_SEND_NOW indicates a channel ID on which sending is possible.
 
+### LE Data Channels
+
+The full title for LE Data Channels is actually LE Connection-Oriented Channels with LE Credit-Based Flow-Control Mode. In this mode, data is sent as Service Data Units (SDUs) that can be larger than an individual HCI LE ACL packet.
+
+LE Data Channels are similar to Classic L2CAP Channels but also provide a credit-based flow control similar to RFCOMM Channels.
+Unless the LE Data Packet Extension of Bluetooth Core 4.2 specification is used, the maximum packet size for LE ACL packets is 27 bytes. In order to send larger packets, each packet will be split into multiple ACL LE packets and recombined on the receiving side. 
+
+Since multiple SDUs can be transmitted at the same time and the individual ACL LE packets can be sent interleaved, BTstack requires a dedicated receive buffer per channel that has to be passed when creating the channel or accepting it. Similarly, when sending SDUs, the data provided to the *l2cap_le_send_data* must stay valid until the *L2CAP_EVENT_LE_PACKET_SENT* is received.
+
+When creating an outgoing connection of accepting an incoming, the *initial_credits* allows to provide a fixed number of credits to the remote side. Further credits can be provided anytime with *l2cap_le_provide_credits*. If *L2CAP_LE_AUTOMATIC_CREDITS* is used, BTstack automatically provides credits as needed - effectively trading in the flow-control functionality for convenience.
+
+The remainder of the API is similar to the one of L2CAP: 
+
+  * *l2cap_le_register_service* and *l2cap_le_unregister_service* are used to manage local services.
+  * *l2cap_le_accept_connection* and *l2cap_le_decline_connection* are used to accept or deny an incoming connection request.
+  * *l2cap_le_create_channel* creates an outgoing connections.
+  * *l2cap_le_can_send_now* checks if a packet can be scheduled for transmission now.
+  * *l2cap_le_request_can_send_now_event* requests an *L2CAP_EVENT_LE_CAN_SEND_NOW* event as soon as possible.
+  * *l2cap_le_disconnect* closes the connection.
+
 ## RFCOMM - Radio Frequency Communication Protocol
 
 The Radio frequency communication (RFCOMM) protocol provides emulation
@@ -310,7 +330,6 @@ of serial ports over the L2CAP protocol. and reassembly. It is the base
 for the Serial Port Profile and other profiles used for
 telecommunication like Head-Set Profile, Hands-Free Profile, Object
 Exchange (OBEX) etc.
-
 
 ### RFCOMM flow control {#sec:flowControlProtocols}
 
@@ -583,7 +602,7 @@ To create an SDP record for an SPP service, you can call
 *spp_create_sdp_record* from with a pointer to a buffer to store the
 record, the server channel number, and a record name.
 
-For other types of records, you can use the other functions in , using
+For other types of records, you can use the other functions in, using
 the data element *de_* functions. Listing [sdpCreate] shows how an SDP
 record containing two SDP attributes can be created. First, a DES is
 created and then the Service Record Handle and Service Class ID List
@@ -597,6 +616,11 @@ a sub-DES. The returned pointer is used to add elements to this sub-DES.
 After adding all UUIDs, the sub-DES is “closed” with
 *de_pop_sequence*.
 
+To register an SDP record, you call *sdp_register_service* with a pointer to it.
+The SDP record can be stored in FLASH since BTstack only stores the pointer.
+Please note that the buffer needs to persist (e.g. global storage, dynamically
+allocated from the heap or in FLASH) and cannot be used to create another SDP
+record.
 
 ### Query remote SDP service {#sec:querySDPProtocols}
 
@@ -753,9 +777,33 @@ notifications and indications can be sent. Please see Section on
 
 The SMP protocol allows to setup authenticated and encrypted LE
 connection. After initialization and configuration, SMP handles security
-related functions on it’s own but emits events when feedback from the
+related functions on its own but emits events when feedback from the
 main app or the user is required. The two main tasks of the SMP protocol
 are: bonding and identity resolving.
+
+### LE Legacy Pairing and LE Secure Connections
+
+The original pairing algorithm introduced in Bluetooth Core V4.0 does not
+provide security in case of an attacker present during the initial pairing.
+To fix this, the Bluetooth Core V4.2 specification introduced the new
+*LE Secure Connections* method, while referring to the original method as *LE Legacy Pairing*.
+
+BTstack supports both pairing methods. To enable the more secure LE Secure Connections method,
+*ENABLE_LE_SECURE_CONNECTIONS* needs to be defined in *btstack_config.h*.
+
+LE Secure Connections are based on Elliptic Curve Diffie-Hellman (ECDH) algorithm for the key exchange.
+On start, a new public/private key pair is generated. During pairing, the
+Long Term Key (LTK) is generated based on the local keypair and the remote public key.
+To facilitate the creation of such a keypairs and the calculation of the LTK,
+the Bluetooth Core V4.2 specification introduced appropriate commands for the Bluetooth controller.
+
+As an alternative for controllers that don't provide these primitives, BTstack provides the relevant crytographic functions in software via the Apache 2.0 licensed [mbed TLS library](https://tls.mbed.org).
+
+There are two details to be aware about using LE Secure Connections:
+
+ - More RAM: It requires an additional 1.5 kB RAM when using mbed TLS instead of hardware support by the Bluetooth controller.
+ - Peripheral must store LTK: Even an LE Peripheral needs to store the LTK in non-volatile memory.
+
 
 ### Initialization
 
@@ -793,7 +841,9 @@ The default SMP configuration in BTstack is to be as open as possible:
 
 -   accept encryption key size from 7..16 bytes,
 
--   expect no authentication requirements, and
+-   expect no authentication requirements,
+
+-   don't support LE Secure Connections, and
 
 -   IO Capabilities set to *IO_CAPABILITY_NO_INPUT_NO_OUTPUT*.
 
@@ -804,9 +854,10 @@ respectively:
 
 -   *sm_set_encryption_key_size_range*
 
--   *sm_set_authentication_requirements*
+-   *sm_set_authentication_requirements* : add SM_AUTHREQ_SECURE_CONNECTION flag to enable LE Secure Connections
 
 -   *sm_set_io_capabilities*
+
 
 ### Identity Resolving
 
@@ -824,35 +875,46 @@ and later:
 
 -   *SM_EVENT_IDENTITY_RESOLVING_FAILED* on lookup failure.
 
-### Bonding process
+### User interaction
 
-In Bluetooth LE, there are three main methods of establishing an
-encrypted connection. From the most to the least secure, these are:
-Out-of-Band (OOB) Data , Passkey, and Just Works.
-
-With OOB data, there needs to be a pre-shared secret 16 byte key. In
-most cases, this is not an option, especially since popular OS like iOS
-don’t provide a way to specify it. It some applications, where both
-sides of a Bluetooth link are developed together, this could provide a
-viable option.
-
-To provide OOB data, you can register an OOB data callback with
-*sm_register_oob_data_callback*.
-
-Depending on the authentication requirements, available OOB data, and
-the enabled STK generation methods, BTstack will request feedback from
+Depending on the authentication requirements, IO capabilities, 
+available OOB data, and the enabled STK generation methods,
+BTstack will request feedback from
 the app in the form of an event:
+
+-   *SM_EVENT_JUST_WORKS_REQUEST*: request a user to accept a Just Works
+    pairing
 
 -   *SM_EVENT_PASSKEY_INPUT_NUMBER*: request user to input a passkey
 
 -   *SM_EVENT_PASSKEY_DISPLAY_NUMBER*: show a passkey to the user
 
--   *SM_EVENT_JUST_WORKS_REQUEST*: request a user to accept a Just Works
-    pairing
+-   *SM_EVENT_NUMERIC_COMPARISON_REQUEST*: show a passkey to the user and request confirmation
 
 To stop the bonding process, *sm_bonding_decline* should be called.
 Otherwise, *sm_just_works_confirm* or *sm_passkey_input* can be
 called.
 
-After the bonding process, *SM_EVENT_PASSKEY_DISPLAY_CANCEL* is emitted to
-update the user interface.
+After the bonding process, *SM_EVENT_JUST_WORKS_CANCEL*, *SM_EVENT_PASSKEY_DISPLAY_CANCEL*, or *SM_EVENT_NUMERIC_COMPARISON_CANCEL* is emitted to update the user interface if an Just Works request or a passkey has been shown before.
+
+### Keypress Notifications
+
+As part of Bluetooth Core V4.2 specification, a device with a keyboard but no display can send keypress notifications to provide better user feedback. In BTstack, the *sm_keypress_notification()* function is used for sending notifcations. Notifications are received by BTstack via the *SM_EVENT_KEYPRESS_NOTIFICATION* event.
+
+### Cross-transport Key Derivation for LE Secure Connections
+
+In a dual-mode configuration, BTstack automatically generates an BR/EDR Link Key from the LE LTK via the Link Key Conversion function *h6*. It is then stored in the link key db.
+
+To derive an LE LTK from a BR/EDR link key, the Bluetooth controller needs to support Secure Connections via NIST P-256 elliptic curves and the LE Secure Connections needs to get established via the LE Transport. BTstack does not support LE Secure Connections via LE Transport currently.
+
+### Out-of-Band Data with LE Legacy Pairing
+
+LE Legacy Pairing can be made secure by providing a way for both devices
+to aquire a pre-shared secret 16 byte key by some fancy method.
+In most cases, this is not an option, especially since popular OS like iOS
+don’t provide a way to specify it. In some applications, where both
+sides of a Bluetooth link are developed together, this could provide a
+viable option.
+
+To provide OOB data, you can register an OOB data callback with
+*sm_register_oob_data_callback*.

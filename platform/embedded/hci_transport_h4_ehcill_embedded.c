@@ -158,6 +158,7 @@ static const hci_transport_h4_t hci_transport_h4_ehcill_dma = {
   /*  .transport.can_send_packet_now           = */  h4_can_send_packet_now,
   /*  .transport.send_packet                   = */  ehcill_send_packet,
   /*  .transport.set_baudrate                  = */  h4_set_baudrate,
+  /*  .transport.reset_link                    = */  NULL,    
     },
   /*  .ds                                      = */  &hci_transport_h4_dma_ds
 };
@@ -167,7 +168,7 @@ static void dummy_handler(uint8_t packet_type, uint8_t *packet, uint16_t size){
 }
 
 // get h4 singleton
-const hci_transport_t * hci_transport_h4_instance(void){ 
+const hci_transport_t * hci_transport_h4_instance(const btstack_uart_block_t * uart_driver){ 
     return &hci_transport_h4_ehcill_dma.transport;
 }
 
@@ -209,9 +210,10 @@ static int h4_set_baudrate(uint32_t baudrate){
 }
 
 static int h4_close(void){
-    // first remove run loop handler
-	btstack_run_loop_remove_data_source(&hci_transport_h4_dma_ds);
-    
+        // remove data source
+    btstack_run_loop_disable_data_source_callbacks(&hci_transport_h4_dma_ds, DATA_SOURCE_CALLBACK_POLL);
+    btstack_run_loop_remove_data_source(&hci_transport_h4_dma_ds);
+
     // stop IRQ
     hal_uart_dma_set_csr_irq_handler(NULL);
     
